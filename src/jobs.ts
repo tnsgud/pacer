@@ -12,6 +12,7 @@ import {
 import { and, asc, desc, eq } from "drizzle-orm";
 import cron from "node-cron";
 import { coachBlocked } from "./ai.js";
+import { config } from "./config.js";
 import { businessDaysBetween, deadlineRisk, isBusinessDate, todayKst } from "./dates.js";
 import { db } from "./db.js";
 import { checkins, steps, tasks } from "./schema.js";
@@ -60,8 +61,8 @@ const mmdd = (iso: string) => `${Number(iso.slice(5, 7))}/${Number(iso.slice(8, 
 const STATUS_LABEL = { done: "완료", doing: "진행 중", blocked: "막힘" } as const;
 
 /**
- * 팀 리더용 현황. /현황과 (다음 단계) 아침 요약이 함께 쓴다.
- * 막힘 요약 문구는 담당자 동의 흐름이 생기기 전까지 넣지 않고 상태만 보여 준다.
+ * 팀 리더용 현황. /현황과 아침 요약이 함께 쓴다.
+ * 막힘 요약 문구는 담당자가 전달에 동의한 경우(shared)에만 붙인다.
  */
 export function statusReport(today = todayKst()): string {
   const groups = { 막힘: [] as string[], "응답 없음": [] as string[], 주의: [] as string[], 순조로움: [] as string[] };
@@ -82,7 +83,8 @@ export function statusReport(today = todayKst()): string {
       `<@${task.assigneeId}> ${task.title} - ${all.length - open.length}/${all.length}단계` +
       (step ? `, 지금 ${step.position}. ${step.title}(목표 ${mmdd(step.dueDate)})` : "") +
       `, 마지막 체크인 ${last ? `${mmdd(last.date)} ${STATUS_LABEL[last.status]}` : "없음"}` +
-      `, 마감 ${mmdd(task.dueDate)} (${risk.reason})`;
+      `, 마감 ${mmdd(task.dueDate)} (${risk.reason})` +
+      (last?.status === "blocked" && last.shared && last.summary ? `\n  └ ${last.summary}` : "");
 
     if (last?.status === "blocked") groups.막힘.push(line);
     else if (businessDaysBetween(since, today) >= 2) groups["응답 없음"].push(line);
@@ -105,7 +107,7 @@ function saveCheckin(task: Task, status: CheckinStatus, summary: string | null) 
     .values({ taskId: task.id, memberId: task.assigneeId, date: todayKst(), status, summary })
     .onConflictDoUpdate({
       target: [checkins.taskId, checkins.memberId, checkins.date],
-      set: { status, summary },
+      set: { status, summary, shared: false }, // 답이 바뀌면 전달 동의도 다시 받는다
     })
     .run();
 }
@@ -116,6 +118,8 @@ export function scheduleJobs(client: Client) {
   cron.schedule("0 18 * * 1-5", () => void sendEveningCheckins(client).catch(console.error), {
     timezone: "Asia/Seoul",
   });
+  // 평일 09:00 KST 아침 요약·안내
+  cron.schedule("0 9 * * 1-5", () => void sendMorning(client).catch(console.error), { timezone: "Asia/Seoul" });
 }
 
 export async function sendEveningCheckins(client: Client) {
@@ -203,5 +207,72 @@ export async function handleBlockedModal(i: ModalSubmitInteraction) {
   const [step] = openSteps(task.id);
   const coach = await coachBlocked(task.title, step?.title ?? "", detail);
   saveCheckin(task, "blocked", coach.summary);
-  await i.editReply(coach.reply);
+  await i.editReply({
+    content:
+      `${coach.reply}\n\n` +
+      `이 상황을 팀 리더님께 전달할까요? 대화 원문이 아니라 아래 한 줄 요약만 가요.\n> ${coach.summary}`,
+    components: [
+      new ActionRowBuilder<ButtonBuilder>().addComponents(
+        new ButtonBuilder().setCustomId(`share:${task.id}:yes`).setLabel("팀 리더님께 전달").setStyle(ButtonStyle.Primary),
+        new ButtonBuilder().setCustomId(`share:${task.id}:no`).setLabel("조금 더 해 볼게요").setStyle(ButtonStyle.Secondary),
+      ),
+    ],
+  });
+}
+
+/** 막힘 요약을 팀 리더에게 넘길지 담당자가 고른다. 동의하면 리더에게 바로 DM하고 아침 요약·/현황에도 표시. */
+export async function handleShareButton(i: ButtonInteraction) {
+  const [, id, answer] = i.customId.split(":");
+  const task = findTask(Number(id));
+  if (!task || task.assigneeId !== i.user.id) {
+    return i.reply({ content: "이 과제의 담당자만 고를 수 있어요." });
+  }
+  const base = i.message.content.split("\n\n이 상황을")[0];
+  if (answer !== "yes") {
+    return i.update({ content: `${base}\n\n알겠어요. 내일 저녁에 다시 물어볼게요.`, components: [] });
+  }
+  const checkin = db
+    .update(checkins)
+    .set({ shared: true })
+    .where(and(eq(checkins.taskId, task.id), eq(checkins.date, todayKst()), eq(checkins.status, "blocked")))
+    .returning()
+    .get();
+  if (!checkin) {
+    return i.update({ content: `${base}\n\n오늘 막힘 기록이 없어서 전달하지 않았어요.`, components: [] });
+  }
+  const leader = await i.client.users.fetch(config.LEADER_ID);
+  await leader.send({
+    content: `🚧 <@${task.assigneeId}> [${task.title}] 막힘\n> ${checkin.summary}\n담당자가 전달에 동의한 요약이에요.`,
+    allowedMentions: { parse: [] },
+  });
+  await i.update({ content: `${base}\n\n팀 리더님께 요약을 전달했어요.`, components: [] });
+}
+
+// ---- 아침: 팀 리더 요약 DM + 담당자 오늘 할 단계 안내 ----
+
+export async function sendMorning(client: Client) {
+  const today = todayKst();
+  if (!isBusinessDate(today)) return;
+
+  try {
+    const leader = await client.users.fetch(config.LEADER_ID);
+    await leader.send({ content: statusReport(today), allowedMentions: { parse: [] } });
+  } catch (err) {
+    console.error("팀 리더 아침 요약 DM 실패", err);
+  }
+
+  for (const task of db.select().from(tasks).where(eq(tasks.status, "approved")).all()) {
+    const [step] = openSteps(task.id);
+    if (!step) continue;
+    try {
+      const user = await client.users.fetch(task.assigneeId);
+      await user.send(
+        `좋은 아침이에요! [${task.title}]\n` +
+          `오늘 할 단계: ${step.position}. ${step.title} (목표 ${mmdd(step.dueDate)})\n` +
+          `최종 마감 ${mmdd(task.dueDate)}까지 영업일 ${businessDaysBetween(today, task.dueDate)}일. 끝나면 /완료 로 알려 주세요.`,
+      );
+    } catch (err) {
+      console.error(`아침 안내 DM 실패 task=${task.id}`, err);
+    }
+  }
 }

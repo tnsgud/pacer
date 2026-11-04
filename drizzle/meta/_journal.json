@@ -8,6 +8,13 @@
       "when": 1793759590017,
       "tag": "0000_cheerful_rattler",
       "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "6",
+      "when": 1793766368965,
+      "tag": "0001_goofy_human_robot",
+      "breakpoints": true
     }
   ]
 }

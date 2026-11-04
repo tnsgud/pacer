@@ -41,6 +41,8 @@ export const checkins = sqliteTable(
     date: text("date").notNull(), // YYYY-MM-DD (KST)
     status: text("status", { enum: ["done", "doing", "blocked"] }).notNull(),
     summary: text("summary"),
+    // 담당자가 "팀 리더님께 전달"에 동의했을 때만 true. true일 때만 summary를 리더에게 보여 준다.
+    shared: integer("shared", { mode: "boolean" }).notNull().default(false),
     createdAt: createdAt(),
   },
   (t) => [unique().on(t.taskId, t.memberId, t.date)],

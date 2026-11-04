@@ -11,7 +11,14 @@ import {
 } from "./commands.js";
 import { config } from "./config.js";
 import { runMigrations } from "./db.js";
-import { handleBlockedModal, handleCheckinButton, scheduleJobs, sendEveningCheckins } from "./jobs.js";
+import {
+  handleBlockedModal,
+  handleCheckinButton,
+  handleShareButton,
+  scheduleJobs,
+  sendEveningCheckins,
+  sendMorning,
+} from "./jobs.js";
 
 runMigrations();
 
@@ -26,8 +33,9 @@ client.once(Events.ClientReady, async (c) => {
   await rest.put(Routes.applicationCommands(config.DISCORD_APP_ID), { body: [doneCommand.toJSON()] });
   scheduleJobs(c);
   console.log(`logged in as ${c.user.tag}`);
-  // 테스트용: npm run dev -- --checkin-now 이면 저녁 체크인을 바로 한 번 보낸다.
+  // 테스트용: npm run dev -- --checkin-now / --morning-now 이면 해당 발송을 바로 한 번 실행한다.
   if (process.argv.includes("--checkin-now")) await sendEveningCheckins(c);
+  if (process.argv.includes("--morning-now")) await sendMorning(c);
 });
 
 client.on(Events.InteractionCreate, async (i) => {
@@ -37,6 +45,7 @@ client.on(Events.InteractionCreate, async (i) => {
     else if (i.isChatInputCommand() && i.commandName === "현황") await handleStatus(i);
     else if (i.isButton() && i.customId.startsWith("checkin:")) await handleCheckinButton(i);
     else if (i.isButton() && i.customId.startsWith("selfdone:")) await handleSelfDoneButton(i);
+    else if (i.isButton() && i.customId.startsWith("share:")) await handleShareButton(i);
     else if (i.isButton()) await handleButton(i);
     else if (i.isModalSubmit() && i.customId.startsWith("blocked:")) await handleBlockedModal(i);
   } catch (err) {
