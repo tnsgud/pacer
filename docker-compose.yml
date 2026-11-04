@@ -1,0 +1,9 @@
+services:
+  pacer:
+    build: .
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      DATABASE_PATH: /app/data/pacer.db
+    volumes:
+      - ./data:/app/data
