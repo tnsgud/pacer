@@ -1,5 +1,12 @@
 import { describe, expect, it } from "vitest";
-import { businessDaysBetween, deadlineRisk } from "./dates.js";
+import { businessDaysBetween, deadlineRisk, isBusinessDate } from "./dates.js";
+
+describe("isBusinessDate", () => {
+  it("평일은 true, 주말은 false", () => {
+    expect(isBusinessDate("2026-11-06")).toBe(true); // 금
+    expect(isBusinessDate("2026-11-07")).toBe(false); // 토
+  });
+});
 
 describe("businessDaysBetween", () => {
   it("주말을 건너뛴다 (2026-11-06 금 → 11-10 화 = 월, 화)", () => {

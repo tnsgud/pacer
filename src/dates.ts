@@ -12,6 +12,8 @@ function isBusinessDay(d: Date): boolean {
   return day !== 0 && day !== 6 && !HOLIDAYS.has(iso);
 }
 
+export const isBusinessDate = (iso: string) => isBusinessDay(new Date(`${iso}T00:00:00Z`));
+
 /** from 다음날부터 to(포함)까지의 영업일 수. to가 from 이전이면 0. */
 export function businessDaysBetween(from: string, to: string): number {
   const end = new Date(`${to}T00:00:00Z`);

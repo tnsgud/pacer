@@ -63,9 +63,11 @@ docker-compose.yml
 
 ## 개발 순서
 
-1. 봇 접속, `/과제` 명령, AI 단계 초안, 팀 리더 승인 버튼
-2. 저녁 Cron으로 DM 체크인과 버튼 처리
-3. 아침 요약과 마감 위험 계산
+1. ✅ 봇 접속, `/과제` 명령, AI 단계 초안, 팀 리더 승인 버튼
+2. ✅ 저녁 체크인: 평일 18:00 KST, 과제마다 DM 한 통. [완료]는 지금 단계를 끝내고 다음 단계를 안내, [진행 중]은 마감 위험이면 경고, [막힘]은 입력창 → AI 힌트, 팀 리더용 한 줄 요약만 저장 (`src/jobs.ts`)
+   - `/완료`: 담당자가 체크인을 기다리지 않고 지금 단계 완료를 직접 등록. 봇 DM에서도 사용 가능(전역 명령). 과제가 여러 개면 버튼으로 고름. 등록하면 그날 저녁 체크인은 보내지 않는다.
+   - `/현황`: 팀 리더 전용. 진행 중인 과제를 막힘·응답 없음(영업일 2일 이상 체크인 없음)·주의(마감 위험 또는 단계 목표일 지남)·순조로움으로 묶어 보여 준다. 항목마다 진행 단계, 마지막 체크인 날짜와 상태, 마감 위험 근거를 표시. 막힘 요약 문구는 담당자 동의 흐름(3단계) 전까지 넣지 않는다. 아침 요약이 같은 함수(`statusReport`)를 쓴다.
+3. 아침 요약(막힘은 담당자 동의 후 전달, 이틀 무응답 표시)과 무응답 재질문
 4. Dockerfile과 Compose로 서버 배포
 
 ## MVP 범위 밖
@@ -78,7 +80,7 @@ docker-compose.yml
 
 ## 환경 변수 (`.env`)
 
-`DISCORD_TOKEN`, `DISCORD_APP_ID`, `DISCORD_GUILD_ID`, `LEADER_ID`(팀 리더 Discord ID), `GROQ_API_KEY`, `GROQ_MODEL`(기본 `qwen/qwen3.8-27b`), `DATABASE_PATH`(기본 `data/pacer.db`)
+`DISCORD_TOKEN`, `DISCORD_APP_ID`, `DISCORD_GUILD_ID`, `LEADER_ID`(팀 리더 Discord ID), `GROQ_API_KEY`, `GROQ_MODEL`(기본 `qwen/qwen3.8-27b`), `GROQ_FALLBACK_MODEL`(기본 `openai/gpt-oss-120b`, 과부하·오류 시 대체), `DATABASE_PATH`(기본 `data/pacer.db`)
 
 ## 실행
 
@@ -86,6 +88,7 @@ docker-compose.yml
 npm install
 cp .env.example .env   # 값 채우기
 npm run dev            # 개발
+npm run dev -- --checkin-now   # 시작하자마자 저녁 체크인을 한 번 보냄 (테스트용, 파일 저장으로 재시작될 때마다 다시 보냄)
 npm test               # 영업일·마감 위험 계산 테스트
 npm run db:generate    # schema.ts 변경 후 마이그레이션 생성
 docker compose up -d --build   # 서버 배포

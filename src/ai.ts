@@ -47,6 +47,23 @@ async function chatJson(system: string, user: string): Promise<unknown> {
   throw new Error(lastError);
 }
 
+const coachSchema = z.object({ reply: z.string().min(1), summary: z.string().min(1) });
+
+/** 막힘 입력에 대한 힌트 답장과 팀 리더용 한 줄 요약. 원문은 저장·전달하지 않는다. */
+export async function coachBlocked(taskTitle: string, stepTitle: string, detail: string) {
+  const json = await chatJson(
+    `너는 신입 프론트엔드 개발자를 돕는 다정한 코치다. 담당자가 막힌 상황을 적었다. ` +
+      `reply: 3~5문장, 한국어 존댓말. 먼저 짧게 공감하고, 흔한 원인을 1~2개 조심스럽게 짚고, ` +
+      `에러 메시지 첫 줄처럼 구체적인 정보를 보내 달라고 한다. 내용이 모호하면 어느 부분에서 막혔는지 되묻는다. ` +
+      `확신이 없는 기술 내용은 추측하지 말고 팀 문서나 팀 리더에게 물어보라고 안내한다. ` +
+      `마지막 문장은 "내일 오전까지 안 풀리면 팀 리더님께 물어보는 걸 추천해요."로 끝낸다. ` +
+      `summary: 팀 리더에게 보여 줄 한 줄 상황 요약(40자 이내, 원문을 그대로 인용하지 않음). ` +
+      `JSON만 출력: {"reply": string, "summary": string}`,
+    `과제: ${taskTitle}\n지금 단계: ${stepTitle}\n담당자 메시지: ${detail}`,
+  );
+  return coachSchema.parse(json);
+}
+
 export async function draftSteps(rawText: string, today: string, due: string): Promise<TaskDraft> {
   const json = await chatJson(
     `신입 개발자에게 줄 과제를 3~6개의 작은 단계로 나누고 단계마다 중간 마감일(YYYY-MM-DD)을 정한다. ` +

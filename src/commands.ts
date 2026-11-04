@@ -4,9 +4,23 @@ import {
   ButtonStyle,
   type ButtonInteraction,
   type ChatInputCommandInteraction,
+  InteractionContextType,
   MessageFlags,
   SlashCommandBuilder,
 } from "discord.js";
+import { activeTasksOf, completeCurrentStep, findTask, statusReport } from "./jobs.js";
+
+export const statusCommand = new SlashCommandBuilder()
+  .setName("현황")
+  .setDescription("진행 중인 과제 현황을 봅니다 (팀 리더 전용)");
+
+export async function handleStatus(i: ChatInputCommandInteraction) {
+  if (i.user.id !== config.LEADER_ID) {
+    return i.reply({ content: "팀 리더만 현황을 볼 수 있어요.", flags: MessageFlags.Ephemeral });
+  }
+  // 멘션은 표시만 되고 알림은 가지 않게 막는다.
+  return i.reply({ content: statusReport(), flags: MessageFlags.Ephemeral, allowedMentions: { parse: [] } });
+}
 import { eq } from "drizzle-orm";
 import { draftSteps } from "./ai.js";
 import { config } from "./config.js";
@@ -20,6 +34,37 @@ export const assignCommand = new SlashCommandBuilder()
   .addUserOption((o) => o.setName("담당자").setDescription("과제를 맡을 사람").setRequired(true))
   .addStringOption((o) => o.setName("내용").setDescription("과제 설명").setRequired(true))
   .addStringOption((o) => o.setName("마감").setDescription("YYYY-MM-DD").setRequired(true));
+
+// 담당자가 체크인을 기다리지 않고 지금 단계 완료를 등록한다. 봇 DM에서도 쓸 수 있게 전역 명령으로 등록.
+export const doneCommand = new SlashCommandBuilder()
+  .setName("완료")
+  .setDescription("지금 단계를 끝냈다고 코치에게 알립니다")
+  .setContexts(InteractionContextType.Guild, InteractionContextType.BotDM);
+
+export async function handleDone(i: ChatInputCommandInteraction) {
+  const active = activeTasksOf(i.user.id);
+  if (active.length === 0) {
+    return i.reply({ content: "지금 진행 중인 과제가 없어요.", flags: MessageFlags.Ephemeral });
+  }
+  if (active.length === 1) {
+    return i.reply({ content: completeCurrentStep(active[0]), flags: MessageFlags.Ephemeral });
+  }
+  // 과제가 여러 개면 어느 과제인지 고르게 한다 (버튼 최대 5개).
+  const row = new ActionRowBuilder<ButtonBuilder>().addComponents(
+    active.slice(0, 5).map((t) =>
+      new ButtonBuilder().setCustomId(`selfdone:${t.id}`).setLabel(t.title.slice(0, 80)).setStyle(ButtonStyle.Success),
+    ),
+  );
+  return i.reply({ content: "어느 과제의 단계를 끝냈나요?", components: [row], flags: MessageFlags.Ephemeral });
+}
+
+export async function handleSelfDoneButton(i: ButtonInteraction) {
+  const task = findTask(Number(i.customId.split(":")[1]));
+  if (!task || task.assigneeId !== i.user.id || task.status !== "approved") {
+    return i.update({ content: "이 과제는 완료를 등록할 수 없어요.", components: [] });
+  }
+  await i.update({ content: completeCurrentStep(task), components: [] });
+}
 
 export async function handleAssign(i: ChatInputCommandInteraction) {
   if (i.user.id !== config.LEADER_ID) {
