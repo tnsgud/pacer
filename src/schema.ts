@@ -16,6 +16,8 @@ export const tasks = sqliteTable("tasks", {
   rawText: text("raw_text").notNull(), // 팀 리더가 쓴 원문 (초안 검증용)
   assigneeId: text("assignee_id").notNull().references(() => members.id),
   dueDate: text("due_date").notNull(), // YYYY-MM-DD
+  // 초안일 때만 쓰는 추가 담당자 ID(쉼표 구분). [이대로 전달] 때 사람마다 과제를 복사하고 비운다.
+  extraAssigneeIds: text("extra_assignee_ids"),
   status: text("status", { enum: ["draft", "approved", "done"] })
     .notNull()
     .default("draft"),

@@ -4,6 +4,7 @@ import {
   ButtonStyle,
   type ButtonInteraction,
   type Client,
+  MessageFlags,
   ModalBuilder,
   type ModalSubmitInteraction,
   TextInputBuilder,
@@ -35,7 +36,7 @@ export function completeCurrentStep(task: Task): string {
   const [step, next] = openSteps(task.id);
   if (!step) return `[${task.title}]은 이미 모든 단계를 끝냈어요.`;
   db.update(steps).set({ done: true }).where(eq(steps.id, step.id)).run();
-  saveCheckin(task, "done", null); // 오늘 답한 것으로 기록 → 저녁 체크인을 다시 보내지 않는다
+  saveCheckin(task, "done", null); // 현황의 "마지막 체크인"에 반영
   if (!next) {
     db.update(tasks).set({ status: "done" }).where(eq(tasks.id, task.id)).run();
     return `🎉 마지막 단계까지 끝냈어요! [${task.title}] 완료입니다. 정말 수고했어요.`;
@@ -128,12 +129,8 @@ export async function sendEveningCheckins(client: Client) {
   for (const task of db.select().from(tasks).where(eq(tasks.status, "approved")).all()) {
     const [step] = openSteps(task.id);
     if (!step) continue;
-    const answered = db
-      .select()
-      .from(checkins)
-      .where(and(eq(checkins.taskId, task.id), eq(checkins.date, today)))
-      .get();
-    if (answered) continue;
+    // 낮에 /완료·/막힘을 썼어도 보낸다. 새 단계에서 막혔는지 하루 한 번은 확인하기 위해서.
+    // (cron은 하루 한 번만 돌므로 같은 날 두 번 가지 않는다. --checkin-now 재시작은 개발용이라 예외.)
 
     const buttons = new ActionRowBuilder<ButtonBuilder>().addComponents(
       new ButtonBuilder().setCustomId(`checkin:${task.id}:done`).setLabel("완료").setStyle(ButtonStyle.Success),
@@ -155,6 +152,22 @@ export async function sendEveningCheckins(client: Client) {
   }
 }
 
+/** 막힘 입력창. 체크인의 [막힘]과 /막힘이 함께 쓴다. 제출하면 handleBlockedModal로 간다. */
+export const blockedModal = (taskId: number) =>
+  new ModalBuilder()
+    .setCustomId(`blocked:${taskId}`)
+    .setTitle("어디서 막혔나요?")
+    .addComponents(
+      new ActionRowBuilder<TextInputBuilder>().addComponents(
+        new TextInputBuilder()
+          .setCustomId("detail")
+          .setLabel("막힌 곳과 에러 메시지를 짧게 적어 주세요")
+          .setStyle(TextInputStyle.Paragraph)
+          .setMaxLength(500)
+          .setRequired(true),
+      ),
+    );
+
 export async function handleCheckinButton(i: ButtonInteraction) {
   const [, id, status] = i.customId.split(":") as [string, string, CheckinStatus];
   const task = findTask(Number(id));
@@ -163,21 +176,7 @@ export async function handleCheckinButton(i: ButtonInteraction) {
   }
 
   if (status === "blocked") {
-    return i.showModal(
-      new ModalBuilder()
-        .setCustomId(`blocked:${task.id}`)
-        .setTitle("어디서 막혔나요?")
-        .addComponents(
-          new ActionRowBuilder<TextInputBuilder>().addComponents(
-            new TextInputBuilder()
-              .setCustomId("detail")
-              .setLabel("막힌 곳과 에러 메시지를 짧게 적어 주세요")
-              .setStyle(TextInputStyle.Paragraph)
-              .setMaxLength(500)
-              .setRequired(true),
-          ),
-        ),
-    );
+    return i.showModal(blockedModal(task.id));
   }
 
   let reply: string;
@@ -201,8 +200,10 @@ export async function handleBlockedModal(i: ModalSubmitInteraction) {
     return i.reply({ content: "이 과제의 담당자만 답할 수 있어요." });
   }
   const detail = i.fields.getTextInputValue("detail");
-  await i.deferReply(); // AI 호출 전에 응답 예약
-  if (i.isFromMessage()) await i.message.edit({ content: `${i.message.content}\n\n→ 막힘`, components: [] });
+  // AI 호출 전에 응답 예약. 서버 채널(/막힘)에서는 남에게 보이지 않게 본인에게만.
+  await i.deferReply(i.inGuild() ? { flags: MessageFlags.Ephemeral } : {});
+  // 체크인 DM이면 버튼을 지운다. /막힘의 과제 선택 메시지(본인에게만 보이는 메시지)는 수정이 안 돼 무시.
+  if (i.isFromMessage()) await i.message.edit({ content: `${i.message.content}\n\n→ 막힘`, components: [] }).catch(() => {});
 
   const [step] = openSteps(task.id);
   const coach = await coachBlocked(task.title, step?.title ?? "", detail);

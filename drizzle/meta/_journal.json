@@ -15,6 +15,13 @@
       "when": 1793766368965,
       "tag": "0001_goofy_human_robot",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "6",
+      "when": 1794207317127,
+      "tag": "0002_rapid_tigra",
+      "breakpoints": true
     }
   ]
 }

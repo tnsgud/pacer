@@ -7,6 +7,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vites
 const LEADER = "leader-1";
 const INTERN = "intern-1";
 const OTHER = "stranger-1";
+const INTERN2 = "intern-2";
 
 Object.assign(process.env, {
   DISCORD_TOKEN: "x",
@@ -58,12 +59,17 @@ function slash(userId: string, opts: Record<string, string> = {}) {
     user: { id: userId },
     client,
     options: {
-      getUser: () => ({ id: opts.assignee ?? INTERN, displayName: "실습생" }),
+      getUser: (name: string) => {
+        if (name === "담당자") return { id: opts.assignee ?? INTERN, displayName: "실습생", bot: false };
+        const id = opts[name];
+        return id ? { id, displayName: id, bot: id.startsWith("bot") } : null;
+      },
       getString: (name: string) => opts[name],
     },
     reply: vi.fn(async () => {}),
     deferReply: vi.fn(async () => {}),
     editReply: vi.fn(async () => {}),
+    showModal: vi.fn(async () => {}),
   } as any;
 }
 function button(userId: string, customId: string, content = "원래 메시지") {
@@ -84,6 +90,7 @@ function modal(userId: string, customId: string, detail: string) {
     customId,
     fields: { getTextInputValue: () => detail },
     isFromMessage: () => true,
+    inGuild: () => false,
     message: { content: "체크인 메시지", edit: vi.fn(async () => {}) },
     reply: vi.fn(async () => {}),
     deferReply: vi.fn(async () => {}),
@@ -158,18 +165,13 @@ describe("/과제 등록과 승인", () => {
 });
 
 describe("저녁 체크인", () => {
-  it("승인된 과제마다 버튼 3개와 함께 DM하고, 오늘 답했으면 다시 보내지 않는다", async () => {
+  it("승인된 과제마다 버튼 3개와 함께 DM한다", async () => {
     const task = await approvedTask();
     sent.clear();
     await jobs.sendEveningCheckins(client);
     const dm = dmsTo(INTERN)[0] as any;
     expect(dm.content).toContain("지금 단계: 1. props 설계");
     expect(customIds(dm)).toEqual([`checkin:${task.id}:done`, `checkin:${task.id}:doing`, `checkin:${task.id}:blocked`]);
-
-    await jobs.handleCheckinButton(button(INTERN, `checkin:${task.id}:doing`));
-    sent.clear();
-    await jobs.sendEveningCheckins(client);
-    expect(dmsTo(INTERN)).toHaveLength(0);
   });
 
   it("주말에는 보내지 않는다", async () => {
@@ -261,13 +263,13 @@ describe("/완료", () => {
     expect(i.reply.mock.calls[0][0].content).toContain("진행 중인 과제가 없어요");
   });
 
-  it("과제가 하나면 바로 지금 단계를 끝내고, 그날 저녁 체크인은 건너뛴다", async () => {
+  it("과제가 하나면 바로 지금 단계를 끝내고, 저녁 체크인은 다음 단계 기준으로 그대로 온다", async () => {
     const task = await approvedTask();
     await commands.handleDone(slash(INTERN));
     expect(stepsOf(task.id)[0].done).toBe(true);
     sent.clear();
     await jobs.sendEveningCheckins(client);
-    expect(dmsTo(INTERN)).toHaveLength(0);
+    expect(text(dmsTo(INTERN)[0])).toContain("지금 단계: 2. 스타일 구현");
   });
 
   it("과제가 여러 개면 버튼으로 고르게 한다", async () => {
@@ -330,7 +332,7 @@ describe("초안 수정과 취소", () => {
     return {
       user: { id: userId },
       client,
-      customId: `editdraft:${id}`,
+      customId: `taskedit:${id}`,
       fields: { getTextInputValue: (k: string) => fields[k] },
       isFromMessage: () => true,
       reply: vi.fn(async () => {}),
@@ -362,7 +364,7 @@ describe("초안 수정과 취소", () => {
       due: "2026-11-20",
       steps: "props·API 설계 - 2026-11-06\nPrimary-Secondary 스타일 - 2026-11-12\n\nStorybook 문서 - 2026-11-18\n리뷰 반영 - 2026-11-20",
     });
-    await commands.handleEditDraftModal(m);
+    await commands.handleTaskEditModal(m);
     const t = jobs.findTask(id)!;
     expect([t.title, t.dueDate, t.status]).toEqual(["버튼 컴포넌트", "2026-11-20", "draft"]);
     expect(stepsOf(id).map((s) => [s.position, s.title, s.dueDate])).toEqual([
@@ -383,7 +385,7 @@ describe("초안 수정과 취소", () => {
       due: "2026-11-13",
       steps: "설계 - 2026-11-05\n구현 2026-11-09\n문서 - 2026-02-30\n리뷰 - 2026-11-20",
     });
-    await commands.handleEditDraftModal(m);
+    await commands.handleTaskEditModal(m);
     const msg = m.reply.mock.calls[0][0].content;
     expect(msg).toContain("2번째 줄");
     expect(msg).toContain("2026-02-30");
@@ -410,7 +412,7 @@ describe("초안 수정과 취소", () => {
       expect(b.reply).toHaveBeenCalled();
     }
     const m = editModal(OTHER, id, { title: "x", due: "2026-11-13", steps: "a - 2026-11-05" });
-    await commands.handleEditDraftModal(m);
+    await commands.handleTaskEditModal(m);
     expect(m.reply).toHaveBeenCalled();
     expect(jobs.findTask(id)!.title).toBe("버튼 컴포넌트 3종");
   });
@@ -445,5 +447,188 @@ describe("/도움말", () => {
     expect(intern.reply.mock.calls[0][0].flags).toBeDefined(); // 본인에게만
 
     for (const text of [l, a]) expect(text.length).toBeLessThanOrEqual(2000); // Discord 메시지 한도
+  });
+});
+
+describe("/막힘", () => {
+  it("과제가 없으면 없다고 답한다", async () => {
+    const i = slash(INTERN);
+    await commands.handleBlockedCommand(i);
+    expect(i.reply.mock.calls[0][0].content).toContain("진행 중인 과제가 없어요");
+  });
+
+  it("과제가 하나면 바로 막힘 입력창을 띄우고, 이후는 [막힘]과 같은 흐름이다", async () => {
+    const task = await approvedTask();
+    const i = slash(INTERN);
+    await commands.handleBlockedCommand(i);
+    expect(i.showModal.mock.calls[0][0].toJSON().custom_id).toBe(`blocked:${task.id}`);
+
+    const m = modal(INTERN, `blocked:${task.id}`, "에러");
+    m.isFromMessage = () => false; // 슬래시 명령에서 연 입력창
+    await jobs.handleBlockedModal(m);
+    expect(customIds(m.editReply.mock.calls[0][0])).toEqual([`share:${task.id}:yes`, `share:${task.id}:no`]);
+    expect(checkinsOf(task.id)[0].status).toBe("blocked");
+  });
+
+  it("서버 채널에서 쓰면 힌트도 본인에게만 보인다", async () => {
+    const task = await approvedTask();
+    const m = modal(INTERN, `blocked:${task.id}`, "에러");
+    m.inGuild = () => true;
+    await jobs.handleBlockedModal(m);
+    expect(m.deferReply.mock.calls[0][0].flags).toBeDefined();
+
+    const dm = modal(INTERN, `blocked:${task.id}`, "에러");
+    await jobs.handleBlockedModal(dm);
+    expect(dm.deferReply.mock.calls[0][0].flags).toBeUndefined(); // DM에서는 기록이 남도록 일반 메시지
+  });
+
+  it("과제가 여러 개면 버튼으로 고르고, 고른 과제의 입력창을 띄운다", async () => {
+    const a = await approvedTask();
+    const b = await approvedTask();
+    const i = slash(INTERN);
+    await commands.handleBlockedCommand(i);
+    expect(customIds(i.reply.mock.calls[0][0])).toEqual([`selfblocked:${a.id}`, `selfblocked:${b.id}`]);
+    const pick = button(INTERN, `selfblocked:${b.id}`);
+    await commands.handleSelfBlockedButton(pick);
+    expect(pick.showModal.mock.calls[0][0].toJSON().custom_id).toBe(`blocked:${b.id}`);
+
+    const other = button(OTHER, `selfblocked:${b.id}`);
+    await commands.handleSelfBlockedButton(other);
+    expect(other.showModal).not.toHaveBeenCalled();
+  });
+
+  it("선택 메시지 수정이 실패해도(본인에게만 보이는 메시지) 힌트는 정상으로 나간다", async () => {
+    const task = await approvedTask();
+    const m = modal(INTERN, `blocked:${task.id}`, "에러");
+    m.message.edit = vi.fn(async () => { throw new Error("Unknown Message"); });
+    await jobs.handleBlockedModal(m);
+    expect(m.editReply).toHaveBeenCalled();
+  });
+});
+
+describe("담당자 여러 명", () => {
+  it("초안은 하나, 전달하면 사람마다 같은 과제가 복사되고 각자 DM을 받는다", async () => {
+    const i = slash(LEADER, { 내용: "버튼 컴포넌트 만들기", 마감: "2026-11-13", 담당자2: INTERN2, 담당자3: INTERN, 담당자4: "bot-1" });
+    await commands.handleAssign(i);
+    const draft = i.editReply.mock.calls[0][0];
+    expect(draft.content).toContain(`<@${INTERN}>, <@${INTERN2}>`); // 중복·봇 제외
+    expect(draft.content).not.toContain("bot-1");
+    const id = Number(customIds(draft)[0].split(":")[1]);
+    expect(db.select().from(schema.tasks).all()).toHaveLength(1); // 전달 전에는 초안 하나
+
+    const approve = button(LEADER, `approve:${id}`);
+    await commands.handleButton(approve);
+    expect(approve.update.mock.calls[0][0].content).toContain("2명에게 전달했어요");
+
+    const all = db.select().from(schema.tasks).all();
+    expect(all.map((t) => [t.assigneeId, t.status, t.extraAssigneeIds])).toEqual([
+      [INTERN, "approved", null],
+      [INTERN2, "approved", null],
+    ]);
+    const [a, b] = all;
+    const shape = (id: number) => stepsOf(id).map((s) => [s.position, s.title, s.dueDate, s.done]);
+    expect(shape(b.id)).toEqual(shape(a.id));
+    expect(text(dmsTo(INTERN)[0])).toContain("새 과제가 왔어요");
+    expect(text(dmsTo(INTERN2)[0])).toContain("새 과제가 왔어요");
+
+    await commands.handleDone(slash(INTERN2)); // 각자 따로 진행
+    expect(stepsOf(b.id)[0].done).toBe(true);
+    expect(stepsOf(a.id)[0].done).toBe(false);
+  });
+
+  it("전달 전에 고친 초안이 모든 사람에게 그대로 복사된다", async () => {
+    const i = slash(LEADER, { 내용: "x", 마감: "2026-11-13", 담당자2: INTERN2 });
+    await commands.handleAssign(i);
+    const id = Number(customIds(i.editReply.mock.calls[0][0])[0].split(":")[1]);
+    const m = {
+      user: { id: LEADER }, client, customId: `taskedit:${id}`, isFromMessage: () => true,
+      fields: { getTextInputValue: (k: string) => ({ title: "고친 제목", due: "2026-11-13", steps: "하나 - 2026-11-10\n둘 - 2026-11-13" })[k] },
+      reply: vi.fn(async () => {}), update: vi.fn(async () => {}),
+    } as any;
+    await commands.handleTaskEditModal(m);
+    expect(m.update.mock.calls[0][0].content).toContain(`<@${INTERN}>, <@${INTERN2}>`);
+    await commands.handleButton(button(LEADER, `approve:${id}`));
+    for (const t of db.select().from(schema.tasks).all()) {
+      expect(t.title).toBe("고친 제목");
+      expect(stepsOf(t.id).map((s) => s.title)).toEqual(["하나", "둘"]);
+    }
+  });
+});
+
+describe("/과제수정 (전달한 과제 수정)", () => {
+  function submit(userId: string, id: number, fields: Record<string, string>) {
+    return {
+      user: { id: userId }, client, customId: `taskedit:${id}`, isFromMessage: () => true,
+      fields: { getTextInputValue: (k: string) => fields[k] },
+      reply: vi.fn(async () => {}), update: vi.fn(async () => {}),
+    } as any;
+  }
+
+  it("팀 리더만 쓸 수 있고, 진행 중인 과제를 버튼으로 보여 준다", async () => {
+    const task = await approvedTask();
+    const no = slash(OTHER);
+    await commands.handleEditTaskCommand(no);
+    expect(no.reply.mock.calls[0][0].content).toContain("팀 리더만");
+
+    const i = slash(LEADER);
+    await commands.handleEditTaskCommand(i);
+    const reply = i.reply.mock.calls[0][0];
+    expect(customIds(reply)).toEqual([`pickedit:${task.id}`]);
+    expect(reply.components[0].toJSON().components[0].label).toBe("버튼 컴포넌트 3종 · 실습생");
+  });
+
+  it("끝난 단계는 빼고 남은 단계만 입력창에 채운다", async () => {
+    const task = await approvedTask();
+    await commands.handleDone(slash(INTERN)); // 1단계 끝
+    const b = button(LEADER, `pickedit:${task.id}`);
+    await commands.handlePickEditButton(b);
+    const modal = b.showModal.mock.calls[0][0].toJSON();
+    expect(modal.title).toContain("끝난 단계 1개는 그대로");
+    expect(modal.components[2].components[0].value).toBe("2. 스타일 구현 - 2026-11-09\n3. Storybook 문서 - 2026-11-13");
+  });
+
+  it("남은 단계·마감을 바꾸고 끝난 단계는 그대로 두며, 담당자에게 알린다", async () => {
+    const task = await approvedTask();
+    await commands.handleDone(slash(INTERN));
+    sent.clear();
+    const m = submit(LEADER, task.id, {
+      title: "버튼 컴포넌트 3종",
+      due: "2026-11-20",
+      steps: "2. 스타일 구현 - 2026-11-12\n3. Storybook 문서 - 2026-11-17\n리뷰 반영 - 2026-11-20",
+    });
+    await commands.handleTaskEditModal(m);
+    expect(stepsOf(task.id).map((s) => [s.position, s.title, s.dueDate, s.done])).toEqual([
+      [1, "props 설계", "2026-11-05", true],
+      [2, "스타일 구현", "2026-11-12", false],
+      [3, "Storybook 문서", "2026-11-17", false],
+      [4, "리뷰 반영", "2026-11-20", false],
+    ]);
+    expect(jobs.findTask(task.id)!.dueDate).toBe("2026-11-20");
+    const dm = text(dmsTo(INTERN)[0]);
+    expect(dm).toContain("과제가 수정됐어요");
+    expect(dm).toContain("끝낸 1단계는 그대로예요");
+    expect(dm).toContain("4. 리뷰 반영 - 2026-11-20");
+    expect(m.update.mock.calls[0][0].content).toContain("수정했고");
+  });
+
+  it("형식이 틀리면 아무것도 바꾸지 않고 담당자에게도 알리지 않는다", async () => {
+    const task = await approvedTask();
+    sent.clear();
+    const m = submit(LEADER, task.id, { title: "x", due: "2026-11-13", steps: "구현 2026-11-09" });
+    await commands.handleTaskEditModal(m);
+    expect(m.reply.mock.calls[0][0].content).toContain("과제는 그대로예요");
+    expect(stepsOf(task.id)).toHaveLength(3);
+    expect(dmsTo(INTERN)).toHaveLength(0);
+  });
+
+  it("다 끝난 과제는 고칠 수 없다", async () => {
+    const task = await approvedTask();
+    for (let n = 0; n < 3; n++) await commands.handleDone(slash(INTERN));
+    const b = button(LEADER, `pickedit:${task.id}`);
+    await commands.handlePickEditButton(b);
+    expect(b.showModal).not.toHaveBeenCalled();
+    const m = submit(LEADER, task.id, { title: "x", due: "2026-11-13", steps: "a - 2026-11-10" });
+    await commands.handleTaskEditModal(m);
+    expect(m.reply.mock.calls[0][0].content).toContain("이미 끝났거나");
   });
 });

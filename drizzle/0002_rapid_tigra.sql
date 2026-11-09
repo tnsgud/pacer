@@ -1,0 +1,1 @@
+ALTER TABLE `tasks` ADD `extra_assignee_ids` text;
