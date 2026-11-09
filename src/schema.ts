@@ -8,6 +8,8 @@ export const members = sqliteTable("members", {
   id: text("id").primaryKey(), // Discord user ID
   name: text("name").notNull(),
   role: text("role", { enum: ["leader", "member"] }).notNull(),
+  // 근무 시간 밖에 소리 없이 보낸 DM이 있으면 true. 다음 아침 안내에 한 줄 알리고 끈다.
+  quietNotice: integer("quiet_notice", { mode: "boolean" }).notNull().default(false),
 });
 
 export const tasks = sqliteTable("tasks", {

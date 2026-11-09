@@ -22,6 +22,8 @@ Discord에서 `/도움말`을 치면 아래 내용을 요약해서 본인에게�
 | 16:00 (금) | 팀 리더 | 주간 리포트: 과제별 완료율, 자주 막힌 단계, 체크인 응답률 |
 | 17:00 | 담당자 | 체크인: "오늘 단계는 끝났나요?" + [완료] [진행 중] [막힘] |
 
+**근무 시간(기본 평일 09:00~18:00) 밖에 생긴 알림은 소리 없이 갑니다.** 새 과제 전달, `/과제수정`, 마감 변경 요청·승인·거절, 막힘 전달처럼 누가 무언가를 해서 생긴 DM은 Discord의 @silent 메시지로 보내서, DM 창에는 들어가지만 휴대폰 알림이나 소리는 나지 않습니다. 담당자가 이런 DM을 받았으면 다음 아침 안내 첫 DM 맨 위에 "📝 어제 퇴근 뒤 바뀐 일정·알림이 있어요"가 한 번 붙습니다. 팀 리더에게 가는 DM도 같은 규칙입니다. 근무 시간은 `.env`의 `WORK_START`, `WORK_END`로 바꿉니다.
+
 주말에는 보내지 않습니다. 낮에 `/완료`나 `/막힘`을 썼어도 저녁 체크인은 갑니다(새 단계에서 막혔는지 하루 한 번은 확인).
 
 ### 팀 리더
@@ -197,7 +199,7 @@ docker-compose.yml
 
 ## 환경 변수 (`.env`)
 
-`DISCORD_TOKEN`, `DISCORD_APP_ID`, `DISCORD_GUILD_ID`, `LEADER_ID`(팀 리더 Discord ID), `CF_ACCOUNT_ID`, `CF_API_TOKEN`(Workers AI 권한), `CF_MODEL`(기본 `@cf/google/gemma-4-26b-a4b-it`), `GROQ_API_KEY`(선택, 대체용), `GROQ_MODEL`(기본 `qwen/qwen3.8-27b`), `DATABASE_PATH`(기본 `data/pacer.db`)
+`DISCORD_TOKEN`, `DISCORD_APP_ID`, `DISCORD_GUILD_ID`, `LEADER_ID`(팀 리더 Discord ID), `CF_ACCOUNT_ID`, `CF_API_TOKEN`(Workers AI 권한), `CF_MODEL`(기본 `@cf/google/gemma-4-26b-a4b-it`), `GROQ_API_KEY`(선택, 대체용), `GROQ_MODEL`(기본 `qwen/qwen3.8-27b`), `DATABASE_PATH`(기본 `data/pacer.db`), `WORK_START`·`WORK_END`(기본 `09:00`·`18:00`, 이 밖의 알림은 소리 없이)
 
 ## 실행
 

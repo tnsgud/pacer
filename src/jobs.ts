@@ -4,6 +4,7 @@ import {
   ButtonStyle,
   type ButtonInteraction,
   type Client,
+  type MessageCreateOptions,
   MessageFlags,
   ModalBuilder,
   type ModalSubmitInteraction,
@@ -14,7 +15,7 @@ import { and, asc, desc, eq, isNull } from "drizzle-orm";
 import cron from "node-cron";
 import { coachBlocked } from "./ai.js";
 import { config } from "./config.js";
-import { businessDaysBetween, deadlineRisk, isBusinessDate, todayKst } from "./dates.js";
+import { businessDaysBetween, deadlineRisk, isBusinessDate, isWorkingHours, todayKst } from "./dates.js";
 import { db } from "./db.js";
 import { checkins, dueRequests, members, steps, tasks } from "./schema.js";
 
@@ -30,6 +31,20 @@ const openSteps = (taskId: number) =>
     .all();
 
 const findTask = (id: number) => db.select().from(tasks).where(eq(tasks.id, id)).get();
+
+/**
+ * 누가 무엇을 해서 생긴 알림 DM(새 과제, 과제 수정, 마감 변경, 막힘 전달 등)을 보낸다.
+ * 근무 시간(평일 WORK_START~WORK_END) 밖이면 알림 없이(@silent) 보내고, 받은 사람이 담당자면
+ * 다음 아침 안내에 "어제 퇴근 뒤 바뀐 게 있어요"를 한 줄 붙이도록 표시해 둔다.
+ * 정해진 시각의 아침 안내·체크인·리포트는 원래 근무 시간에 나가므로 이 함수를 쓰지 않는다.
+ */
+export async function sendDm(client: Client, userId: string, msg: string | MessageCreateOptions) {
+  const opts: MessageCreateOptions = typeof msg === "string" ? { content: msg } : msg;
+  const quiet = !isWorkingHours(new Date(), config.WORK_START, config.WORK_END);
+  const user = await client.users.fetch(userId);
+  await user.send(quiet ? { ...opts, flags: MessageFlags.SuppressNotifications } : opts);
+  if (quiet) db.update(members).set({ quietNotice: true }).where(eq(members.id, userId)).run();
+}
 
 /** 지금 단계를 끝냄으로 표시하고 담당자에게 보낼 답장을 돌려준다. 체크인 버튼과 /완료가 함께 쓴다. */
 export function completeCurrentStep(task: Task): string {
@@ -267,8 +282,7 @@ export async function handleShareButton(i: ButtonInteraction) {
   if (!checkin) {
     return i.update({ content: `${base}\n\n오늘 막힘 기록이 없어서 전달하지 않았어요.`, components: [] });
   }
-  const leader = await i.client.users.fetch(config.LEADER_ID);
-  await leader.send({
+  await sendDm(i.client, config.LEADER_ID, {
     content: `🚧 <@${task.assigneeId}> [${task.title}] 막힘\n> ${checkin.summary}\n담당자가 전달에 동의한 요약이에요.`,
     allowedMentions: { parse: [] },
   });
@@ -299,17 +313,28 @@ export async function sendMorning(client: Client) {
     console.error("팀 리더 아침 요약 DM 실패", err);
   }
 
+  const noticed = new Set<string>();
   for (const task of db.select().from(tasks).where(eq(tasks.status, "approved")).all()) {
     const [step] = openSteps(task.id);
     if (!step) continue;
     try {
+      // 퇴근 뒤 소리 없이 보낸 DM이 있으면 그 사람의 첫 아침 안내에만 한 줄 알린다.
+      const member = db.select().from(members).where(eq(members.id, task.assigneeId)).get();
+      const quietNote = member?.quietNotice && !noticed.has(task.assigneeId)
+        ? "📝 어제 퇴근 뒤 바뀐 일정·알림이 있어요. 위쪽 DM을 확인해 주세요.\n\n"
+        : "";
       const user = await client.users.fetch(task.assigneeId);
       await user.send(
+        quietNote +
         `좋은 아침이에요! [${task.title}]\n` +
           `오늘 할 단계: ${step.position}. ${step.title} (목표 ${mmdd(step.dueDate)})\n` +
           `최종 마감 ${mmdd(task.dueDate)}까지 영업일 ${businessDaysBetween(today, task.dueDate)}일. 끝나면 /완료 로 알려 주세요.` +
           morningRiskNote(task, today),
       );
+      if (quietNote) {
+        noticed.add(task.assigneeId);
+        db.update(members).set({ quietNotice: false }).where(eq(members.id, task.assigneeId)).run();
+      }
     } catch (err) {
       console.error(`아침 안내 DM 실패 task=${task.id}`, err);
     }

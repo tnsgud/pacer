@@ -14,6 +14,15 @@ function isBusinessDay(d: Date): boolean {
 
 export const isBusinessDate = (iso: string) => isBusinessDay(new Date(`${iso}T00:00:00Z`));
 
+/** now가 근무 시간(영업일의 start~end, KST, "HH:MM")인지. end는 포함하지 않는다. */
+export function isWorkingHours(now: Date, start: string, end: string): boolean {
+  if (!isBusinessDate(todayKst(now))) return false;
+  const hm = new Intl.DateTimeFormat("en-GB", {
+    timeZone: "Asia/Seoul", hour: "2-digit", minute: "2-digit", hourCycle: "h23",
+  }).format(now);
+  return hm >= start && hm < end;
+}
+
 /** from 다음날부터 to(포함)까지의 영업일 수. to가 from 이전이면 0. */
 export function businessDaysBetween(from: string, to: string): number {
   const end = new Date(`${to}T00:00:00Z`);

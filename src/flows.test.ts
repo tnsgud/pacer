@@ -981,3 +981,62 @@ describe("바뀐 점 표시", () => {
     expect(stepsOf(task.id).map((x) => x.id)).toEqual(before); // 다시 만들지도 않음
   });
 });
+
+describe("근무 시간 밖 알림은 소리 없이", () => {
+  const SILENT = 4096; // MessageFlags.SuppressNotifications
+  const at = (kst: string) => vi.setSystemTime(new Date(`${kst}+09:00`));
+  const member = (id: string) => db.select().from(schema.members).where(eq(schema.members.id, id)).get()!;
+  function edit(taskId: number, steps: string) {
+    return commands.handleTaskEditModal({
+      user: { id: LEADER }, client, customId: `taskedit:${taskId}`, isFromMessage: () => true,
+      fields: { getTextInputValue: (k: string) => ({ title: "버튼 컴포넌트 3종", due: "2026-11-13", steps })[k] },
+      reply: vi.fn(async () => {}), update: vi.fn(async () => {}),
+    } as any);
+  }
+
+  it("근무 시간에 고치면 평소처럼 알림이 간다", async () => {
+    const task = await approvedTask();
+    sent.clear();
+    at("2026-11-04T15:00");
+    await edit(task.id, "스타일 - 2026-11-10");
+    expect((dmsTo(INTERN)[0] as any).flags).toBeUndefined();
+    expect(member(INTERN).quietNotice).toBe(false);
+  });
+
+  it("퇴근 뒤에 고치면 소리 없이 보내고, 다음 아침 안내 첫 DM에 한 번만 알린다", async () => {
+    const a = await approvedTask();
+    await approvedTask(); // 같은 담당자의 두 번째 과제
+    sent.clear();
+    at("2026-11-04T22:30");
+    await edit(a.id, "스타일 - 2026-11-10");
+    const dm = dmsTo(INTERN)[0] as any;
+    expect(dm.flags).toBe(SILENT);
+    expect(dm.content).toContain("과제가 수정됐어요");
+    expect(member(INTERN).quietNotice).toBe(true);
+
+    sent.clear();
+    at("2026-11-05T09:00");
+    await jobs.sendMorning(client);
+    const [first, second] = dmsTo(INTERN).map(text);
+    expect(first.startsWith("📝 어제 퇴근 뒤 바뀐 일정·알림이 있어요")).toBe(true);
+    expect(second).not.toContain("📝");
+    expect(member(INTERN).quietNotice).toBe(false);
+
+    sent.clear();
+    at("2026-11-06T09:00");
+    await jobs.sendMorning(client);
+    expect(dmsTo(INTERN).map(text).join()).not.toContain("📝");
+  });
+
+  it("주말에 생긴 알림도 소리 없이, 담당자가 밤에 보낸 요청은 팀 리더에게 소리 없이 간다", async () => {
+    const task = await approvedTask();
+    sent.clear();
+    at("2026-11-07T11:00"); // 토요일
+    await commands.handleDueRequestModal({
+      user: { id: INTERN }, client, customId: `duereq:${task.id}`,
+      fields: { getTextInputValue: (k: string) => ({ due: "2026-11-20", reason: "x" })[k] },
+      reply: vi.fn(async () => {}),
+    } as any);
+    expect((dmsTo(LEADER)[0] as any).flags).toBe(SILENT);
+  });
+});

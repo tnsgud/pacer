@@ -1,5 +1,19 @@
 import { describe, expect, it } from "vitest";
-import { businessDaysBetween, deadlineRisk, isBusinessDate } from "./dates.js";
+import { businessDaysBetween, deadlineRisk, isBusinessDate, isWorkingHours } from "./dates.js";
+
+describe("isWorkingHours", () => {
+  const kst = (iso: string) => new Date(`${iso}+09:00`);
+  it("평일 09:00~18:00(18:00 제외)만 근무 시간", () => {
+    expect(isWorkingHours(kst("2026-11-04T08:59"), "09:00", "18:00")).toBe(false);
+    expect(isWorkingHours(kst("2026-11-04T09:00"), "09:00", "18:00")).toBe(true);
+    expect(isWorkingHours(kst("2026-11-04T17:59"), "09:00", "18:00")).toBe(true);
+    expect(isWorkingHours(kst("2026-11-04T18:00"), "09:00", "18:00")).toBe(false);
+    expect(isWorkingHours(kst("2026-11-05T00:30"), "09:00", "18:00")).toBe(false); // 자정 넘어
+  });
+  it("주말은 시간과 상관없이 근무 시간이 아니다", () => {
+    expect(isWorkingHours(kst("2026-11-07T10:00"), "09:00", "18:00")).toBe(false);
+  });
+});
 
 describe("isBusinessDate", () => {
   it("평일은 true, 주말은 false", () => {

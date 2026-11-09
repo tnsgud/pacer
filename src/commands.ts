@@ -23,6 +23,7 @@ import {
   completeCurrentStep,
   findTask,
   markLeaderSeen,
+  sendDm,
   type Seen,
   statusReport,
   weeklyReport,
@@ -116,6 +117,8 @@ const ASSIGNEE_HELP = [
   "• `/마감변경` 최종 마감을 바꾸고 싶으면 날짜와 이유를 적어 팀 리더님께 요청해요. 승인되면 DM으로 알려 드려요.",
   "  세 명령 모두 봇과의 DM에서도 쓸 수 있어요.",
   "• `/도움말` 이 안내를 다시 봐요.",
+  "",
+  "평일 09:00~18:00 밖에 생긴 알림(과제 수정 등)은 소리 없이 와요. 다음 날 아침 안내에서 한 번 더 알려 드려요.",
   "",
   "DM이 안 오면 서버 개인정보 설정에서 \"서버 멤버가 보내는 다이렉트 메시지 허용\"을 켜 주세요.",
 ].join("\n");
@@ -432,8 +435,7 @@ export async function handleButton(i: ButtonInteraction) {
   const failed: string[] = [];
   for (const t of created) {
     try {
-      const user = await i.client.users.fetch(t.assigneeId);
-      await user.send(`새 과제가 왔어요: ${t.title} (마감 ${t.dueDate})\n` + stepLines(stepsOf(t.id)));
+      await sendDm(i.client, t.assigneeId, `새 과제가 왔어요: ${t.title} (마감 ${t.dueDate})\n` + stepLines(stepsOf(t.id)));
     } catch (err) {
       console.error(`과제 DM 실패 task=${t.id}`, err);
       failed.push(`<@${t.assigneeId}>`);
@@ -549,8 +551,7 @@ export async function handleTaskEditModal(i: ModalSubmitInteraction) {
   const summary = diff.changes.map((c) => `• ${c}`).join("\n");
   let notice = `✏️ <@${task.assigneeId}> [${title}] 수정했고 알렸어요\n${summary}`;
   try {
-    const user = await i.client.users.fetch(task.assigneeId);
-    await user.send(changeMessage(`✏️ [${title}] 과제가 수정됐어요`, diff, doneCount));
+    await sendDm(i.client, task.assigneeId, changeMessage(`✏️ [${title}] 과제가 수정됐어요`, diff, doneCount));
   } catch (err) {
     console.error(`수정 알림 DM 실패 task=${task.id}`, err);
     notice = `✏️ <@${task.assigneeId}> [${title}] 수정했지만 DM을 보내지 못했어요. DM 허용 설정을 확인해 주세요.\n${summary}`;
@@ -619,8 +620,7 @@ export async function handleDueRequestModal(i: ModalSubmitInteraction) {
   const req = db.insert(dueRequests)
     .values({ taskId: task.id, oldDue: task.dueDate, newDue, reason }).returning().get();
   try {
-    const leader = await i.client.users.fetch(config.LEADER_ID);
-    await leader.send({
+    await sendDm(i.client, config.LEADER_ID, {
       content:
         `📅 <@${task.assigneeId}> 마감 변경 요청\n[${task.title}] ${task.dueDate} → **${newDue}**\n> ${reason.replace(/\n/g, "\n> ")}\n\n남은 단계:\n` +
         stepLines(stepsOf(task.id).filter((s) => !s.done)),
@@ -682,8 +682,7 @@ export async function handleDueDecision(i: ButtonInteraction) {
     note = "거절했어요. 담당자에게 알렸어요.";
   }
   try {
-    const user = await i.client.users.fetch(task.assigneeId);
-    await user.send(toAssignee);
+    await sendDm(i.client, task.assigneeId, toAssignee);
   } catch (err) {
     console.error(`마감 변경 결과 DM 실패 req=${req.id}`, err);
     note += " (담당자에게 DM을 보내지 못했어요.)";

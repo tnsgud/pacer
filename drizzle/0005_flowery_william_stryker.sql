@@ -1,0 +1,1 @@
+ALTER TABLE `members` ADD `quiet_notice` integer DEFAULT false NOT NULL;
