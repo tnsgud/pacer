@@ -25,7 +25,6 @@ import {
   markLeaderSeen,
   type Seen,
   statusReport,
-  successReport,
   weeklyReport,
 } from "./jobs.js";
 import { dueRequests, members, steps, tasks } from "./schema.js";
@@ -56,10 +55,6 @@ export const dueChangeCommand = new SlashCommandBuilder()
 export const weeklyCommand = new SlashCommandBuilder()
   .setName("주간리포트")
   .setDescription("이번 주 완료율·자주 막힌 단계·체크인 응답률을 봅니다 (팀 리더 전용)");
-
-export const successCommand = new SlashCommandBuilder()
-  .setName("성공기준")
-  .setDescription("기획안 성공 기준 달성 현황을 봅니다 (팀 리더 전용)");
 
 export const statusCommand = new SlashCommandBuilder()
   .setName("현황")
@@ -142,10 +137,7 @@ const LEADER_HELP = [
   "• 막힘 · 응답 없음 · 주의 · 순조로움으로 묶어 보여 드려요.",
   "",
   "**주간 리포트** `/주간리포트` (서버 채널)",
-  "• 이번 주 과제별 완료율, 자주 막힌 단계, 체크인 응답률. 금요일 16:00에는 DM으로도 와요.",
-  "",
-  "**성공 기준** `/성공기준` (서버 채널)",
-  "• 초안 수정 횟수, 체크인 응답률, 막힘 인지 시간, 마감 놓친 과제를 기획안 목표와 비교해요. 주간 리포트에도 붙어요.",
+  "• 이번 주 과제별 완료율, 자주 막힌 단계, 체크인 응답률, 성공 기준 달성 현황. 금요일 16:00에는 DM으로도 와요.",
   "",
   "**자동으로 오는 것**",
   "• 평일 09:00 팀 과제 현황 DM",
@@ -697,13 +689,6 @@ export async function handleDueDecision(i: ButtonInteraction) {
     note += " (담당자에게 DM을 보내지 못했어요.)";
   }
   return i.update({ content: `${i.message.content}\n\n${note}`, components: [], allowedMentions: { parse: [] } });
-}
-
-export async function handleSuccess(i: ChatInputCommandInteraction) {
-  if (i.user.id !== config.LEADER_ID) {
-    return i.reply({ content: "팀 리더만 볼 수 있어요.", flags: MessageFlags.Ephemeral });
-  }
-  return i.reply({ content: successReport(), flags: MessageFlags.Ephemeral, allowedMentions: { parse: [] } });
 }
 
 export async function handleWeekly(i: ChatInputCommandInteraction) {

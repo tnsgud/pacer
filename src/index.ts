@@ -18,8 +18,6 @@ import {
   handleSelfBlockedButton,
   handleSelfDoneButton,
   handleStatus,
-  handleSuccess,
-  successCommand,
   handleTaskEditModal,
   handleWeekly,
   weeklyCommand,
@@ -46,7 +44,7 @@ client.once(Events.ClientReady, async (c) => {
   const rest = new REST().setToken(config.DISCORD_TOKEN);
   // /과제는 팀 서버 전용, /완료·/막힘·/마감변경·/도움말은 봇 DM에서도 쓰도록 전역 등록
   await rest.put(Routes.applicationGuildCommands(config.DISCORD_APP_ID, config.DISCORD_GUILD_ID), {
-    body: [assignCommand.toJSON(), editTaskCommand.toJSON(), statusCommand.toJSON(), weeklyCommand.toJSON(), successCommand.toJSON()],
+    body: [assignCommand.toJSON(), editTaskCommand.toJSON(), statusCommand.toJSON(), weeklyCommand.toJSON()],
   });
   await rest.put(Routes.applicationCommands(config.DISCORD_APP_ID), { body: [doneCommand.toJSON(), blockedCommand.toJSON(), dueChangeCommand.toJSON(), helpCommand.toJSON()] });
   scheduleJobs(c);
@@ -64,7 +62,6 @@ client.on(Events.InteractionCreate, async (i) => {
     else if (i.isChatInputCommand() && i.commandName === "과제수정") await handleEditTaskCommand(i);
     else if (i.isChatInputCommand() && i.commandName === "마감변경") await handleDueChangeCommand(i);
     else if (i.isChatInputCommand() && i.commandName === "주간리포트") await handleWeekly(i);
-    else if (i.isChatInputCommand() && i.commandName === "성공기준") await handleSuccess(i);
     else if (i.isChatInputCommand() && i.commandName === "도움말") await handleHelp(i);
     else if (i.isChatInputCommand() && i.commandName === "막힘") await handleBlockedCommand(i);
     else if (i.isButton() && i.customId.startsWith("checkin:")) await handleCheckinButton(i);

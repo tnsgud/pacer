@@ -13,8 +13,6 @@ const schema = z.object({
   GROQ_API_KEY: z.string().optional(),
   GROQ_MODEL: z.string().default("qwen/qwen3.8-27b"),
   DATABASE_PATH: z.string().default("data/pacer.db"),
-  // 성공 기준을 셀 운영 시작일 (YYYY-MM-DD). 비우면 전체 기간
-  METRICS_SINCE: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional().or(z.literal("").transform(() => undefined)),
 });
 
 export const config = schema.parse(process.env);

@@ -917,14 +917,18 @@ describe("성공 기준 측정", () => {
     expect(text(dmsTo(INTERN)[0])).toContain("⚠️ 마감이 빠듯해요 (남은 단계 3개, 남은 영업일 1일)");
   });
 
-  it("/성공기준은 팀 리더만 보고, 주간 리포트에도 붙는다", async () => {
-    const no = slash(OTHER);
-    await commands.handleSuccess(no);
-    expect(no.reply.mock.calls[0][0].content).toContain("팀 리더만");
-    const yes = slash(LEADER);
-    await commands.handleSuccess(yes);
-    expect(yes.reply.mock.calls[0][0].content).toContain("**성공 기준** (전체 기간)");
-    expect(jobs.weeklyReport()).toContain("**성공 기준**");
+  it("성공 기준은 주간 리포트에 넣지 않는다 (도입 평가용, npm run metrics로만 봄)", () => {
+    expect(jobs.weeklyReport()).not.toContain("성공 기준");
+    expect(jobs.weeklyReport()).toContain("체크인 응답률");
+  });
+
+  it("since를 주면 그날부터 생긴 과제만 센다", async () => {
+    await approvedTask("2026-11-05"); // 11/4 생성, 11/5 마감
+    setToday("2026-11-10");
+    expect(jobs.successReport()).toContain("마감 놓친 과제 1건");
+    const r = jobs.successReport(undefined, "2026-11-09");
+    expect(r).toContain("성공 기준 (2026-11-09부터 2026-11-10까지)");
+    expect(r).toContain("✅ 마감 놓친 과제 0건");
   });
 });
 

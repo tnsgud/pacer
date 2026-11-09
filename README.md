@@ -48,11 +48,16 @@ Discord에서 `/도움말`을 치면 아래 내용을 요약해서 본인에게�
 이번 주(월요일~오늘) 기준입니다.
 - **과제별 완료율**: 진행 중인 과제와 이번 주에 끝난 과제. 끝낸 단계 수/전체, 이번 주에 끝낸 단계 수, 마감 위험이면 근거.
 - **자주 막힌 단계**: 이번 주 막힘 체크인을 "과제 › 단계"로 묶어 많은 순 5개. 같은 과제를 여러 명이 받았으면 합쳐서 셉니다.
-- **체크인 응답률**(목표 80%): 사람별로 과제를 받은 뒤의 영업일 중 체크인한 날. 오늘은 이미 답했을 때만 셉니다(16:00 발송이 17:00 체크인보다 먼저라서).
+- **체크인 응답률**(목표 80%, 성공 기준 중 이것만 주간 리포트에도 들어감): 사람별로 과제를 받은 뒤의 영업일 중 체크인한 날. 오늘은 이미 답했을 때만 셉니다(16:00 발송이 17:00 체크인보다 먼저라서).
 
-**성공 기준 보기: `/성공기준`** (팀 서버 채널에서, 주간 리포트 끝에도 붙음)
+**성공 기준 평가** (봇 밖에서, 도입한 사람이 확인)
 
-기획안 섹션 5-2의 성공 기준을 운영 시작일(`.env`의 `METRICS_SINCE`, 비우면 전체 기간)부터 누적으로 계산해 목표와 비교합니다(✅/❌).
+기획안 섹션 5-2의 성공 기준은 봇을 도입한 사람이 "봇이 제 역할을 하는가"를 판단하는 평가 기준이라 Discord에는 보여 주지 않습니다. 봇은 필요한 기록만 쌓고, 결과는 터미널에서 봅니다. 운영 시작일부터 누적으로 계산해 목표와 비교합니다(✅/❌).
+
+```bash
+npm run metrics -- --since 2026-11-16          # 로컬 (since를 빼면 전체 기간)
+docker compose exec pacer node dist/metrics.js --since 2026-11-16   # 서버
+```
 
 | 기준 | 계산 방법 |
 | --- | --- |
@@ -63,7 +68,7 @@ Discord에서 `/도움말`을 치면 아래 내용을 요약해서 본인에게�
 
 "어디까지 했어?" 질문 횟수와 2주 후 설문은 봇 밖에서 직접 재야 합니다.
 
-**운영을 시작할 때는 `.env`에 `METRICS_SINCE=시작일`을 넣으세요.** 테스트하던 기록이 성공 기준에 섞이지 않습니다.
+**운영 시작일을 `--since`로 꼭 넘기세요.** 빼면 테스트하던 기록까지 섞입니다.
 
 **마감 변경 요청 받기**
 
@@ -192,7 +197,7 @@ docker-compose.yml
 
 ## 환경 변수 (`.env`)
 
-`DISCORD_TOKEN`, `DISCORD_APP_ID`, `DISCORD_GUILD_ID`, `LEADER_ID`(팀 리더 Discord ID), `CF_ACCOUNT_ID`, `CF_API_TOKEN`(Workers AI 권한), `CF_MODEL`(기본 `@cf/google/gemma-4-26b-a4b-it`), `GROQ_API_KEY`(선택, 대체용), `GROQ_MODEL`(기본 `qwen/qwen3.8-27b`), `DATABASE_PATH`(기본 `data/pacer.db`), `METRICS_SINCE`(선택, 성공 기준을 셀 운영 시작일)
+`DISCORD_TOKEN`, `DISCORD_APP_ID`, `DISCORD_GUILD_ID`, `LEADER_ID`(팀 리더 Discord ID), `CF_ACCOUNT_ID`, `CF_API_TOKEN`(Workers AI 권한), `CF_MODEL`(기본 `@cf/google/gemma-4-26b-a4b-it`), `GROQ_API_KEY`(선택, 대체용), `GROQ_MODEL`(기본 `qwen/qwen3.8-27b`), `DATABASE_PATH`(기본 `data/pacer.db`)
 
 ## 실행
 

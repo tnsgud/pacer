@@ -374,9 +374,6 @@ export function weeklyReport(today = todayKst()): string {
   );
   lines.push(rateLines.length ? `**체크인 응답률** (목표 80%)\n${rateLines.join("\n")}` : "**체크인 응답률**: 해당 없음");
 
-  // 4) 성공 기준 누적 (운영 시작일부터)
-  lines.push(successReport(today));
-
   const text = lines.join("\n\n");
   return text.length > DISCORD_LIMIT ? `${text.slice(0, DISCORD_LIMIT - 10)}\n…(생략)` : text;
 }
@@ -416,15 +413,16 @@ function responseRates(from: string, today: string) {
 }
 
 /**
- * 기획안 섹션 5-2 성공 기준을 운영 시작일(METRICS_SINCE, 없으면 전체 기간)부터 누적으로 계산한다.
+ * 기획안 섹션 5-2 성공 기준을 since(없으면 전체 기간)부터 누적으로 계산한다.
+ * 봇 사용자에게 보여 주는 기능이 아니라 도입 평가용이라 Discord에는 내보내지 않고 `npm run metrics`로만 본다.
  * 봇 밖에서 재야 하는 것("어디까지 했어?" 횟수, 설문)은 넣지 않는다.
  */
-export function successReport(today = todayKst()): string {
-  const since = config.METRICS_SINCE ?? "0000-01-01";
+export function successReport(today = todayKst(), sinceDate?: string): string {
+  const since = sinceDate ?? "0000-01-01";
   const created = (t: Task) => t.createdAt.slice(0, 10) >= since;
   const mark = (ok: boolean) => (ok ? "✅" : "❌");
   const all = db.select().from(tasks).all().filter((t) => t.status !== "draft" && created(t));
-  const out: string[] = [`**성공 기준** (${config.METRICS_SINCE ? `${mmdd(since)}부터` : "전체 기간"})`];
+  const out: string[] = [`성공 기준 (${sinceDate ? `${sinceDate}부터 ${today}까지` : `전체 기간, ${today}까지`})`];
 
   // 1) 초안의 80% 이상이 수정 1회 이내로 확정 (복사본은 빼고 원본만)
   const drafts = all.filter((t) => t.draftEdits !== null);
