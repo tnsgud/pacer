@@ -13,7 +13,8 @@ Object.assign(process.env, {
   DISCORD_APP_ID: "x",
   DISCORD_GUILD_ID: "x",
   LEADER_ID: LEADER,
-  GROQ_API_KEY: "x",
+  CF_ACCOUNT_ID: "x",
+  CF_API_TOKEN: "x",
   DATABASE_PATH: join(mkdtempSync(join(tmpdir(), "pacer-test-")), "test.db"),
 });
 
@@ -34,6 +35,7 @@ const schema = await import("./schema.js");
 const jobs = await import("./jobs.js");
 const commands = await import("./commands.js");
 const { eq } = await import("drizzle-orm");
+const { todayKst } = await import("./dates.js");
 
 // ---- 가짜 Discord ----
 const sent = new Map<string, unknown[]>();
@@ -96,6 +98,8 @@ async function approvedTask(due = "2026-11-13", assignee = INTERN) {
   await commands.handleAssign(i);
   const id = Number(customIds(i.editReply.mock.calls[0][0])[0].split(":")[1]);
   await commands.handleButton(button(LEADER, `approve:${id}`));
+  // 생성 시각은 SQLite가 실제 시계로 찍으므로 고정한 오늘 날짜에 맞춘다
+  db.update(schema.tasks).set({ createdAt: `${todayKst()} 03:00:00` }).where(eq(schema.tasks.id, id)).run();
   return jobs.findTask(id)!;
 }
 const stepsOf = (taskId: number) =>

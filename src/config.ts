@@ -5,9 +5,13 @@ const schema = z.object({
   DISCORD_APP_ID: z.string().min(1),
   DISCORD_GUILD_ID: z.string().min(1),
   LEADER_ID: z.string().min(1),
-  GROQ_API_KEY: z.string().min(1),
+  // Cloudflare Workers AI (기본 AI)
+  CF_ACCOUNT_ID: z.string().min(1),
+  CF_API_TOKEN: z.string().min(1),
+  CF_MODEL: z.string().default("@cf/google/gemma-4-26b-a4b-it"),
+  // Groq (선택, 있으면 Workers AI 실패 시 대체)
+  GROQ_API_KEY: z.string().optional(),
   GROQ_MODEL: z.string().default("qwen/qwen3.8-27b"),
-  GROQ_FALLBACK_MODEL: z.string().default("openai/gpt-oss-120b"),
   DATABASE_PATH: z.string().default("data/pacer.db"),
 });
 

@@ -12,22 +12,50 @@ export type TaskDraft = z.infer<typeof draftSchema>;
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
-// 호출부는 이 함수 하나뿐이라 Groq ↔ 다른 업체 교체는 여기서만 한다.
-// 429·5xx(과부하)면 1s·2s 간격으로 재시도하고, 그래도 안 되면 대체 모델로 넘어간다.
+type Provider = { name: string; url: string; key: string; model: string };
+
+// 기본은 Cloudflare Workers AI(무료 하루 10,000 Neurons), Groq 키가 있으면 대체 업체로 쓴다.
+// 둘 다 OpenAI 호환 /chat/completions 형식이라 주소·키·모델만 다르다.
+export function providers(): Provider[] {
+  const list: Provider[] = [
+    {
+      name: "Workers AI",
+      url: `https://api.cloudflare.com/client/v4/accounts/${config.CF_ACCOUNT_ID}/ai/v1/chat/completions`,
+      key: config.CF_API_TOKEN,
+      model: config.CF_MODEL,
+    },
+  ];
+  if (config.GROQ_API_KEY) {
+    list.push({
+      name: "Groq",
+      url: "https://api.groq.com/openai/v1/chat/completions",
+      key: config.GROQ_API_KEY,
+      model: config.GROQ_MODEL,
+    });
+  }
+  return list;
+}
+
+/** 모델이 ```json 코드블록이나 앞뒤 설명을 붙여도 JSON 객체만 꺼낸다. */
+export function extractJson(text: string): unknown {
+  const start = text.indexOf("{");
+  const end = text.lastIndexOf("}");
+  if (start < 0 || end < start) throw new Error(`JSON 없음: ${text.slice(0, 200)}`);
+  return JSON.parse(text.slice(start, end + 1));
+}
+
+// 호출부는 이 함수 하나뿐이라 업체 교체는 여기서만 한다.
+// 429·5xx(과부하)면 1s·2s 간격으로 재시도하고, 그래도 안 되거나 JSON이 깨지면 다음 업체로 넘어간다.
 async function chatJson(system: string, user: string): Promise<unknown> {
-  const models = [config.GROQ_MODEL, config.GROQ_FALLBACK_MODEL].filter(Boolean);
   let lastError = "";
-  for (const model of models) {
+  for (const p of providers()) {
     for (let attempt = 0; attempt < 3; attempt++) {
       if (attempt > 0) await sleep(1000 * 2 ** (attempt - 1));
-      const res = await fetch("https://api.groq.com/openai/v1/chat/completions", {
+      const res = await fetch(p.url, {
         method: "POST",
-        headers: {
-          authorization: `Bearer ${config.GROQ_API_KEY}`,
-          "content-type": "application/json",
-        },
+        headers: { authorization: `Bearer ${p.key}`, "content-type": "application/json" },
         body: JSON.stringify({
-          model,
+          model: p.model,
           response_format: { type: "json_object" },
           messages: [
             { role: "system", content: system },
@@ -37,11 +65,17 @@ async function chatJson(system: string, user: string): Promise<unknown> {
       });
       if (res.ok) {
         const data = (await res.json()) as { choices: { message: { content: string } }[] };
-        return JSON.parse(data.choices[0].message.content);
+        try {
+          return extractJson(data.choices[0].message.content);
+        } catch (err) {
+          lastError = `${p.name} (${p.model}) JSON 파싱 실패: ${err}`;
+          console.warn(lastError);
+          break; // 같은 모델로 다시 해도 비슷하다 → 다음 업체
+        }
       }
-      lastError = `Groq ${res.status} (${model}): ${await res.text()}`;
+      lastError = `${p.name} ${res.status} (${p.model}): ${await res.text()}`;
       console.warn(lastError);
-      if (res.status !== 429 && res.status < 500) break; // 404 등은 재시도해도 같다 → 다음 모델
+      if (res.status !== 429 && res.status < 500) break; // 400·403·404는 재시도해도 같다
     }
   }
   throw new Error(lastError);

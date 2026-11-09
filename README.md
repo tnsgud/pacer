@@ -12,7 +12,7 @@
 | Discord | `discord.js` v14, Gateway 상시 접속 (슬래시 명령·버튼·모달·DM) |
 | 스케줄 | `node-cron`, `timezone: 'Asia/Seoul'` |
 | DB | SQLite (`better-sqlite3`) + `drizzle-orm/better-sqlite3` (마이그레이션 `drizzle-kit`) |
-| AI | Groq (OpenAI 호환 `fetch`) 기본, Cloudflare Workers AI REST 대비용 |
+| AI | Cloudflare Workers AI 무료 등급(REST, OpenAI 호환 `/ai/v1/chat/completions`) 기본, Groq 대체(선택) |
 | 검증 | `zod` (AI가 만든 단계 초안 JSON 검증) |
 | 테스트 | `vitest` (영업일·마감 위험 계산만) |
 | 배포 | 회사 서버, Docker (`node:24-slim`) + Docker Compose |
@@ -22,7 +22,7 @@
 - **Cloudflare Workers 대신 회사 서버의 Node 봇.** Workers는 Gateway 상시 접속이 안 돼 "@코치 한 줄 등록"과 DM 자유 입력을 쓸 수 없고, 슬래시 명령은 3초 안에 응답해야 하며, Cron이 UTC로 고정된다. 서버에서 돌리면 이 제약이 모두 사라진다.
 - **Supabase 대신 SQLite.** 사용자 2명, 컨테이너 1개 규모라 별도 DB 서비스가 주는 이점이 없다. 계정과 키 관리만 늘어난다.
 - **Drizzle ORM.** 스키마를 TypeScript로 정의하고 타입을 추론해 쓴다. 테이블이 3~4개라 가볍다.
-- **AI 기본값은 Groq.** 서버에는 Workers AI 바인딩이 없다. 한국어 품질은 같은 과제를 두 쪽에 넣어 비교해 정하고, 호출부를 함수 하나로 감싸 교체를 쉽게 한다.
+- **AI 기본값은 Cloudflare Workers AI 무료 등급.** 하루 10,000 Neurons 무료(00:00 UTC 초기화), 초과하면 Workers Paid 없이는 오류. 서버라 바인딩 대신 REST로 호출. 일부 대형 모델(kimi-k2.6, glm-5.2 등)은 무료 등급에서 403이라 무료 등급 모델(기본 `@cf/google/gemma-4-26b-a4b-it`)을 쓴다. `GROQ_API_KEY`가 있으면 Workers AI가 과부하·오류·JSON 깨짐일 때 Groq로 넘어간다. 호출부는 `src/ai.ts`의 `chatJson` 하나.
 - **Node 24 LTS 런타임.** `discord.js`의 공식 지원 런타임이라 Gateway 안정성 위험이 없다. Bun은 검토했으나 쓰지 않는다. `.nvmrc`와 `engines`를 24로 맞춘다.
 - **드라이버는 `better-sqlite3`.** 동기식이라 코드가 단순하다. Node 내장 `node:sqlite`는 아직 실험 단계라 쓰지 않는다.
 - **Flue 미적용.** Flue는 도구를 쓰며 스스로 판단하는 자율 에이전트용 하네스(Astro 팀, 실험 단계)다. 이 봇은 순서가 고정된 워크플로에 AI 호출이 세 곳(단계 초안, 힌트·응원, 요약)뿐이라 직접 짠 `ai.ts` 함수로 충분하다. 나중에 에이전트가 코드·문서를 읽고 스스로 조사해야 하면 다시 검토한다.
@@ -58,7 +58,7 @@ docker-compose.yml
 - **DB 연결 직후 `PRAGMA journal_mode = WAL`, `PRAGMA foreign_keys = ON`을 실행한다.**
 - **재시작 대응.** 시작할 때 오늘 체크인이 이미 나갔는지 DB로 확인하고, 놓쳤으면 한 번만 보낸다.
 - **Discord 개발자 포털에서 Message Content Intent를 켠다.** "@코치 한 줄 등록"에 필요하다.
-- **방화벽.** 아웃바운드로 Discord, Groq에 나갈 수 있어야 한다. Gateway 방식은 인바운드 포트가 필요 없다.
+- **방화벽.** 아웃바운드로 Discord, `api.cloudflare.com`, (대체를 쓰면) `api.groq.com`에 나갈 수 있어야 한다. Gateway 방식은 인바운드 포트가 필요 없다.
 - **데이터 보관.** 체크인 원문은 저장하지 않고 상태와 요약만 남긴다. 팀 리더에게도 원문은 보내지 않는다.
 
 ## 개발 순서
@@ -86,7 +86,7 @@ docker-compose.yml
 
 ## 환경 변수 (`.env`)
 
-`DISCORD_TOKEN`, `DISCORD_APP_ID`, `DISCORD_GUILD_ID`, `LEADER_ID`(팀 리더 Discord ID), `GROQ_API_KEY`, `GROQ_MODEL`(기본 `qwen/qwen3.8-27b`), `GROQ_FALLBACK_MODEL`(기본 `openai/gpt-oss-120b`, 과부하·오류 시 대체), `DATABASE_PATH`(기본 `data/pacer.db`)
+`DISCORD_TOKEN`, `DISCORD_APP_ID`, `DISCORD_GUILD_ID`, `LEADER_ID`(팀 리더 Discord ID), `CF_ACCOUNT_ID`, `CF_API_TOKEN`(Workers AI 권한), `CF_MODEL`(기본 `@cf/google/gemma-4-26b-a4b-it`), `GROQ_API_KEY`(선택, 대체용), `GROQ_MODEL`(기본 `qwen/qwen3.8-27b`), `DATABASE_PATH`(기본 `data/pacer.db`)
 
 ## 실행
 
