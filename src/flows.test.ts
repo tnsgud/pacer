@@ -122,6 +122,7 @@ afterAll(() => vi.useRealTimers());
 beforeEach(() => {
   setToday("2026-11-04"); // 수요일
   sent.clear();
+  db.delete(schema.dueRequests).run();
   db.delete(schema.checkins).run();
   db.delete(schema.steps).run();
   db.delete(schema.tasks).run();
@@ -630,5 +631,176 @@ describe("/과제수정 (전달한 과제 수정)", () => {
     const m = submit(LEADER, task.id, { title: "x", due: "2026-11-13", steps: "a - 2026-11-10" });
     await commands.handleTaskEditModal(m);
     expect(m.reply.mock.calls[0][0].content).toContain("이미 끝났거나");
+  });
+});
+
+describe("마감 변경 요청 (담당자 → 팀 리더 승인)", () => {
+  function dueModal(userId: string, taskId: number, due: string, reason = "Storybook 설정이 오래 걸려요", c: any = client) {
+    return {
+      user: { id: userId }, client: c, customId: `duereq:${taskId}`,
+      fields: { getTextInputValue: (k: string) => ({ due, reason })[k] },
+      reply: vi.fn(async () => {}),
+    } as any;
+  }
+  const requests = () => db.select().from(schema.dueRequests).all();
+  async function requestAndGetDecision(taskId: number, due = "2026-11-20") {
+    await commands.handleDueRequestModal(dueModal(INTERN, taskId, due));
+    const dm = dmsTo(LEADER).at(-1) as any;
+    return { dm, ids: customIds(dm) };
+  }
+
+  it("과제가 하나면 바로 요청 입력창을 띄운다", async () => {
+    const task = await approvedTask();
+    const i = slash(INTERN);
+    await commands.handleDueChangeCommand(i);
+    expect(i.showModal.mock.calls[0][0].toJSON().custom_id).toBe(`duereq:${task.id}`);
+  });
+
+  it("요청하면 저장하고 팀 리더에게 이유·남은 단계와 [승인] [거절]을 DM한다", async () => {
+    const task = await approvedTask();
+    sent.clear();
+    const m = dueModal(INTERN, task.id, "2026-11-20");
+    await commands.handleDueRequestModal(m);
+    const [req] = requests();
+    expect([req.oldDue, req.newDue, req.status]).toEqual(["2026-11-13", "2026-11-20", "pending"]);
+    const dm = dmsTo(LEADER)[0] as any;
+    expect(dm.content).toContain("2026-11-13 → **2026-11-20**");
+    expect(dm.content).toContain("> Storybook 설정이 오래 걸려요");
+    expect(customIds(dm)).toEqual([`duedecide:${req.id}:yes`, `duedecide:${req.id}:no`]);
+    expect(m.reply.mock.calls[0][0].content).toContain("요청을 보냈어요");
+    expect(jobs.findTask(task.id)!.dueDate).toBe("2026-11-13"); // 승인 전에는 그대로
+    expect(jobs.statusReport()).toContain("📅 마감 변경 요청 11/20 대기");
+  });
+
+  it("날짜가 틀리거나 지났거나 같거나, 이미 대기 중이면 요청하지 않는다", async () => {
+    const task = await approvedTask();
+    sent.clear();
+    for (const [due, msg] of [["2026-13-01", "올바르지 않아요"], ["2026-11-03", "이전 날짜"], ["2026-11-13", "같은 날짜"]]) {
+      const m = dueModal(INTERN, task.id, due);
+      await commands.handleDueRequestModal(m);
+      expect(m.reply.mock.calls[0][0].content).toContain(msg);
+    }
+    expect(requests()).toHaveLength(0);
+    await commands.handleDueRequestModal(dueModal(INTERN, task.id, "2026-11-20"));
+    const again = dueModal(INTERN, task.id, "2026-11-25");
+    await commands.handleDueRequestModal(again);
+    expect(again.reply.mock.calls[0][0].content).toContain("기다리고 있어요");
+    expect(requests()).toHaveLength(1);
+    expect(dmsTo(LEADER)).toHaveLength(1);
+  });
+
+  it("다른 사람은 남의 과제 마감 변경을 요청할 수 없다", async () => {
+    const task = await approvedTask();
+    const m = dueModal(OTHER, task.id, "2026-11-20");
+    await commands.handleDueRequestModal(m);
+    expect(requests()).toHaveLength(0);
+  });
+
+  it("[승인]하면 마감과 예전 마감에 맞춰 있던 단계를 옮기고 담당자에게 알린다", async () => {
+    const task = await approvedTask();
+    sent.clear();
+    const { ids } = await requestAndGetDecision(task.id, "2026-11-20");
+    const b = button(LEADER, ids[0], "요청 메시지");
+    await commands.handleDueDecision(b);
+    expect(jobs.findTask(task.id)!.dueDate).toBe("2026-11-20");
+    expect(stepsOf(task.id).map((s) => s.dueDate)).toEqual(["2026-11-05", "2026-11-09", "2026-11-20"]);
+    expect(requests()[0].status).toBe("approved");
+    expect(text(dmsTo(INTERN).at(-1))).toContain("승인됐어요: [버튼 컴포넌트 3종] 2026-11-13 → 2026-11-20");
+    expect(b.update.mock.calls[0][0].content).toContain("승인했어요");
+    expect(jobs.statusReport()).not.toContain("마감 변경 요청");
+  });
+
+  it("마감을 앞당기면 새 마감보다 늦은 단계도 새 마감으로 당긴다", async () => {
+    const task = await approvedTask();
+    const { ids } = await requestAndGetDecision(task.id, "2026-11-06");
+    await commands.handleDueDecision(button(LEADER, ids[0]));
+    expect(stepsOf(task.id).map((s) => s.dueDate)).toEqual(["2026-11-05", "2026-11-06", "2026-11-06"]);
+  });
+
+  it("[거절]하면 그대로 두고 담당자에게 알린다", async () => {
+    const task = await approvedTask();
+    const { ids } = await requestAndGetDecision(task.id);
+    await commands.handleDueDecision(button(LEADER, ids[1]));
+    expect(jobs.findTask(task.id)!.dueDate).toBe("2026-11-13");
+    expect(requests()[0].status).toBe("rejected");
+    expect(text(dmsTo(INTERN).at(-1))).toContain("이번에는 어렵대요");
+  });
+
+  it("팀 리더만 결정하고, 이미 결정한 요청은 다시 처리하지 않는다", async () => {
+    const task = await approvedTask();
+    const { ids } = await requestAndGetDecision(task.id);
+    const other = button(OTHER, ids[0]);
+    await commands.handleDueDecision(other);
+    expect(other.reply).toHaveBeenCalled();
+    await commands.handleDueDecision(button(LEADER, ids[1]));
+    const late = button(LEADER, ids[0]);
+    await commands.handleDueDecision(late);
+    expect(late.update.mock.calls[0][0].content).toContain("이미 처리됐거나");
+    expect(jobs.findTask(task.id)!.dueDate).toBe("2026-11-13");
+  });
+
+  it("팀 리더에게 DM을 못 보내면 요청을 남기지 않는다", async () => {
+    const task = await approvedTask();
+    const broken = { users: { fetch: async () => ({ send: async () => { throw new Error("Cannot send messages to this user"); } }) } };
+    const m = dueModal(INTERN, task.id, "2026-11-20", "x", broken);
+    await commands.handleDueRequestModal(m);
+    expect(requests()).toHaveLength(0);
+    expect(m.reply.mock.calls[0][0].content).toContain("보내지 못했어요");
+  });
+});
+
+describe("주간 리포트", () => {
+  it("과제별 완료율, 이번 주 끝낸 단계, 자주 막힌 단계, 응답률을 보여 준다", async () => {
+    const task = await approvedTask(); // 11/4(수) 생성
+    await commands.handleDone(slash(INTERN)); // 11/4 1단계 완료
+    setToday("2026-11-05"); // 목: 2단계에서 막힘
+    await jobs.handleBlockedModal(modal(INTERN, `blocked:${task.id}`, "에러"));
+    setToday("2026-11-06"); // 금 16:00 리포트 (오늘 체크인 전)
+
+    const r = jobs.weeklyReport();
+    expect(r).toContain("📊 주간 리포트 11/2~11/6");
+    expect(r).toContain("버튼 컴포넌트 3종 - 1/3단계 (33%), 이번 주 1단계");
+    expect(r).toContain("• 버튼 컴포넌트 3종 › 스타일 구현 - 1회");
+    expect(r).toContain(`<@${INTERN}> 2/2일 (100%)`); // 수·목 답함, 금은 아직이라 제외
+  });
+
+  it("답하지 않은 날은 응답률에 반영된다", async () => {
+    await approvedTask(); // 수
+    await commands.handleDone(slash(INTERN)); // 수 답함
+    setToday("2026-11-06"); // 목은 답 없음
+    expect(jobs.weeklyReport()).toContain(`<@${INTERN}> 1/2일 (50%)`);
+  });
+
+  it("지난주에 끝난 과제는 빼고, 이번 주에 끝낸 과제는 완료로 표시한다", async () => {
+    const task = await approvedTask();
+    for (let n = 0; n < 3; n++) await commands.handleDone(slash(INTERN));
+    expect(jobs.weeklyReport()).toContain("3/3단계 (100%), 이번 주 3단계 ✅ 완료");
+    setToday("2026-11-13");
+    expect(jobs.weeklyReport()).toContain("이번 주 진행한 과제가 없어요");
+    expect(jobs.findTask(task.id)!.status).toBe("done");
+  });
+
+  it("금요일 발송은 팀 리더에게 DM, /주간리포트는 팀 리더만 본다", async () => {
+    await approvedTask();
+    sent.clear();
+    await jobs.sendWeekly(client);
+    expect(text(dmsTo(LEADER)[0])).toContain("주간 리포트");
+    const no = slash(OTHER);
+    await commands.handleWeekly(no);
+    expect(no.reply.mock.calls[0][0].content).toContain("팀 리더만");
+    const yes = slash(LEADER);
+    await commands.handleWeekly(yes);
+    expect(yes.reply.mock.calls[0][0].content).toContain("과제별 완료율");
+  });
+});
+
+describe("날짜 검증", () => {
+  it("없는 날짜는 오류 없이 거절한다", async () => {
+    for (const due of ["2026-13-01", "2026-02-30", "2026-00-10"]) {
+      const i = slash(LEADER, { 내용: "x", 마감: due });
+      await commands.handleAssign(i);
+      expect(i.reply.mock.calls[0][0].content).toContain("YYYY-MM-DD");
+    }
+    expect(commands.parseSteps("a - 2026-13-01", "2026-12-31").errors[0]).toContain("올바르지 않아요");
   });
 });

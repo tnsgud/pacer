@@ -31,6 +31,7 @@ export const steps = sqliteTable("steps", {
   title: text("title").notNull(),
   dueDate: text("due_date").notNull(),
   done: integer("done", { mode: "boolean" }).notNull().default(false),
+  doneAt: text("done_at"), // 끝낸 날 YYYY-MM-DD (KST). 주간 리포트용
 });
 
 // 원문은 저장하지 않고 상태와 요약만 남긴다.
@@ -42,6 +43,8 @@ export const checkins = sqliteTable(
     memberId: text("member_id").notNull().references(() => members.id),
     date: text("date").notNull(), // YYYY-MM-DD (KST)
     status: text("status", { enum: ["done", "doing", "blocked"] }).notNull(),
+    // 체크인 당시 단계 제목. 주간 리포트의 "자주 막힌 단계"용. /과제수정으로 단계가 바뀌어도 남도록 제목을 복사해 둔다.
+    stepTitle: text("step_title"),
     summary: text("summary"),
     // 담당자가 "팀 리더님께 전달"에 동의했을 때만 true. true일 때만 summary를 리더에게 보여 준다.
     shared: integer("shared", { mode: "boolean" }).notNull().default(false),
@@ -49,3 +52,14 @@ export const checkins = sqliteTable(
   },
   (t) => [unique().on(t.taskId, t.memberId, t.date)],
 );
+
+// 담당자의 마감 변경 요청. 팀 리더가 승인해야 과제 마감이 바뀐다.
+export const dueRequests = sqliteTable("due_requests", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  taskId: integer("task_id").notNull().references(() => tasks.id),
+  oldDue: text("old_due").notNull(),
+  newDue: text("new_due").notNull(),
+  reason: text("reason").notNull(), // 담당자가 팀 리더에게 보내려고 직접 쓴 이유
+  status: text("status", { enum: ["pending", "approved", "rejected"] }).notNull().default("pending"),
+  createdAt: createdAt(),
+});

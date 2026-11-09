@@ -16,7 +16,7 @@ import { coachBlocked } from "./ai.js";
 import { config } from "./config.js";
 import { businessDaysBetween, deadlineRisk, isBusinessDate, todayKst } from "./dates.js";
 import { db } from "./db.js";
-import { checkins, steps, tasks } from "./schema.js";
+import { checkins, dueRequests, members, steps, tasks } from "./schema.js";
 
 type Task = typeof tasks.$inferSelect;
 type CheckinStatus = (typeof checkins.$inferInsert)["status"];
@@ -35,8 +35,8 @@ const findTask = (id: number) => db.select().from(tasks).where(eq(tasks.id, id))
 export function completeCurrentStep(task: Task): string {
   const [step, next] = openSteps(task.id);
   if (!step) return `[${task.title}]은 이미 모든 단계를 끝냈어요.`;
-  db.update(steps).set({ done: true }).where(eq(steps.id, step.id)).run();
-  saveCheckin(task, "done", null); // 현황의 "마지막 체크인"에 반영
+  db.update(steps).set({ done: true, doneAt: todayKst() }).where(eq(steps.id, step.id)).run();
+  saveCheckin(task, "done", null, step.title); // 현황의 "마지막 체크인"에 반영
   if (!next) {
     db.update(tasks).set({ status: "done" }).where(eq(tasks.id, task.id)).run();
     return `🎉 마지막 단계까지 끝냈어요! [${task.title}] 완료입니다. 정말 수고했어요.`;
@@ -79,12 +79,18 @@ export function statusReport(today = todayKst()): string {
       .get();
     const risk = deadlineRisk(open.length, today, task.dueDate);
     const since = last?.date ?? task.createdAt.slice(0, 10);
+    const pending = db
+      .select()
+      .from(dueRequests)
+      .where(and(eq(dueRequests.taskId, task.id), eq(dueRequests.status, "pending")))
+      .get();
 
     const line =
       `<@${task.assigneeId}> ${task.title} - ${all.length - open.length}/${all.length}단계` +
       (step ? `, 지금 ${step.position}. ${step.title}(목표 ${mmdd(step.dueDate)})` : "") +
       `, 마지막 체크인 ${last ? `${mmdd(last.date)} ${STATUS_LABEL[last.status]}` : "없음"}` +
       `, 마감 ${mmdd(task.dueDate)} (${risk.reason})` +
+      (pending ? `, 📅 마감 변경 요청 ${mmdd(pending.newDue)} 대기` : "") +
       (last?.status === "blocked" && last.shared && last.summary ? `\n  └ ${last.summary}` : "");
 
     if (last?.status === "blocked") groups.막힘.push(line);
@@ -103,24 +109,27 @@ export function statusReport(today = todayKst()): string {
   ].join("\n\n");
 }
 
-function saveCheckin(task: Task, status: CheckinStatus, summary: string | null) {
+/** 오늘 체크인을 기록한다(과제·사람·날짜당 하나, 다시 답하면 덮어씀). 단계 제목은 주간 리포트용으로 복사해 둔다. */
+function saveCheckin(task: Task, status: CheckinStatus, summary: string | null, stepTitle = openSteps(task.id)[0]?.title ?? null) {
   db.insert(checkins)
-    .values({ taskId: task.id, memberId: task.assigneeId, date: todayKst(), status, summary })
+    .values({ taskId: task.id, memberId: task.assigneeId, date: todayKst(), status, summary, stepTitle })
     .onConflictDoUpdate({
       target: [checkins.taskId, checkins.memberId, checkins.date],
-      set: { status, summary, shared: false }, // 답이 바뀌면 전달 동의도 다시 받는다
+      set: { status, summary, stepTitle, shared: false }, // 답이 바뀌면 전달 동의도 다시 받는다
     })
     .run();
 }
 
 export function scheduleJobs(client: Client) {
-  // 평일 18:00 KST 저녁 체크인
-  // ponytail: 18:00에 봇이 꺼져 있으면 그날 체크인은 건너뛴다. 필요해지면 시작 시 보정 발송 추가.
-  cron.schedule("0 18 * * 1-5", () => void sendEveningCheckins(client).catch(console.error), {
+  // 평일 17:00 KST 저녁 체크인
+  // ponytail: 17:00에 봇이 꺼져 있으면 그날 체크인은 건너뛴다. 필요해지면 시작 시 보정 발송 추가.
+  cron.schedule("0 17 * * 1-5", () => void sendEveningCheckins(client).catch(console.error), {
     timezone: "Asia/Seoul",
   });
   // 평일 09:00 KST 아침 요약·안내
   cron.schedule("0 9 * * 1-5", () => void sendMorning(client).catch(console.error), { timezone: "Asia/Seoul" });
+  // 금요일 16:00 KST 주간 리포트 (저녁 체크인 전)
+  cron.schedule("0 16 * * 5", () => void sendWeekly(client).catch(console.error), { timezone: "Asia/Seoul" });
 }
 
 export async function sendEveningCheckins(client: Client) {
@@ -276,4 +285,84 @@ export async function sendMorning(client: Client) {
       console.error(`아침 안내 DM 실패 task=${task.id}`, err);
     }
   }
+}
+
+// ---- 주간 리포트 (금요일 16:00 팀 리더 DM, /주간리포트) ----
+
+const addDays = (iso: string, n: number) => {
+  const d = new Date(`${iso}T00:00:00Z`);
+  d.setUTCDate(d.getUTCDate() + n);
+  return d.toISOString().slice(0, 10);
+};
+const mondayOf = (iso: string) => addDays(iso, -((new Date(`${iso}T00:00:00Z`).getUTCDay() + 6) % 7));
+const DISCORD_LIMIT = 1990;
+
+/**
+ * 이번 주(월요일~오늘) 리포트: 과제별 완료율, 자주 막힌 단계, 사람별 체크인 응답률.
+ * 응답률의 분모는 과제를 받은 뒤의 영업일. 오늘은 이미 답했을 때만 센다(16:00 발송이 17:00 체크인보다 먼저라서).
+ */
+export function weeklyReport(today = todayKst()): string {
+  const monday = mondayOf(today);
+  const inWeek = (d: string | null) => !!d && d >= monday && d <= today;
+  const lines: string[] = [`📊 주간 리포트 ${mmdd(monday)}~${mmdd(today)}`];
+
+  // 1) 과제별 완료율: 진행 중인 과제 + 이번 주에 끝난 과제
+  const taskLines: string[] = [];
+  for (const task of db.select().from(tasks).where(eq(tasks.status, "approved")).all()
+    .concat(db.select().from(tasks).where(eq(tasks.status, "done")).all())) {
+    const all = db.select().from(steps).where(eq(steps.taskId, task.id)).all();
+    const done = all.filter((s) => s.done);
+    const thisWeek = done.filter((s) => inWeek(s.doneAt)).length;
+    if (task.status === "done" && thisWeek === 0) continue; // 지난주 이전에 끝난 과제는 뺀다
+    const pct = all.length ? Math.round((done.length / all.length) * 100) : 0;
+    const risk = task.status === "approved" ? deadlineRisk(all.length - done.length, today, task.dueDate) : null;
+    taskLines.push(
+      `• <@${task.assigneeId}> ${task.title} - ${done.length}/${all.length}단계 (${pct}%), 이번 주 ${thisWeek}단계` +
+        (task.status === "done" ? " ✅ 완료" : "") +
+        (risk?.atRisk ? ` ⚠️ 마감 ${mmdd(task.dueDate)} (${risk.reason})` : ""),
+    );
+  }
+  lines.push(taskLines.length ? `**과제별 완료율**\n${taskLines.join("\n")}` : "**과제별 완료율**: 이번 주 진행한 과제가 없어요.");
+
+  // 2) 자주 막힌 단계: 이번 주 막힘 체크인을 (과제 제목, 단계 제목)으로 묶는다. 사람이 달라도 같은 과제면 합친다.
+  const weekCheckins = db.select({ c: checkins, title: tasks.title }).from(checkins)
+    .innerJoin(tasks, eq(tasks.id, checkins.taskId)).all()
+    .filter(({ c }) => inWeek(c.date));
+  const blockedCount = new Map<string, number>();
+  for (const { c, title } of weekCheckins) {
+    if (c.status !== "blocked") continue;
+    const key = `${title} › ${c.stepTitle ?? "(단계 정보 없음)"}`;
+    blockedCount.set(key, (blockedCount.get(key) ?? 0) + 1);
+  }
+  const top = [...blockedCount].sort((a, b) => b[1] - a[1]).slice(0, 5);
+  lines.push(top.length
+    ? `**자주 막힌 단계**\n${top.map(([k, n]) => `• ${k} - ${n}회`).join("\n")}`
+    : "**자주 막힌 단계**: 이번 주 막힘 없음");
+
+  // 3) 체크인 응답률 (운영 지표, 목표 80%)
+  const rateLines: string[] = [];
+  for (const m of db.select().from(members).all()) {
+    const mine = db.select().from(tasks).where(eq(tasks.assigneeId, m.id)).all().filter((t) => t.status !== "draft");
+    if (mine.length === 0) continue;
+    const answered = new Set(weekCheckins.filter(({ c }) => c.memberId === m.id).map(({ c }) => c.date));
+    let asked = 0;
+    let replied = 0;
+    for (let d = monday; d <= today; d = addDays(d, 1)) {
+      if (!isBusinessDate(d)) continue;
+      if (!mine.some((t) => t.createdAt.slice(0, 10) <= d)) continue;
+      if (d === today && !answered.has(d)) continue;
+      asked++;
+      if (answered.has(d)) replied++;
+    }
+    if (asked) rateLines.push(`• <@${m.id}> ${replied}/${asked}일 (${Math.round((replied / asked) * 100)}%)`);
+  }
+  lines.push(rateLines.length ? `**체크인 응답률** (목표 80%)\n${rateLines.join("\n")}` : "**체크인 응답률**: 해당 없음");
+
+  const text = lines.join("\n\n");
+  return text.length > DISCORD_LIMIT ? `${text.slice(0, DISCORD_LIMIT - 10)}\n…(생략)` : text;
+}
+
+export async function sendWeekly(client: Client) {
+  const leader = await client.users.fetch(config.LEADER_ID);
+  await leader.send({ content: weeklyReport(), allowedMentions: { parse: [] } });
 }

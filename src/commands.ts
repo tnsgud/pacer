@@ -17,8 +17,8 @@ import { draftSteps } from "./ai.js";
 import { config } from "./config.js";
 import { todayKst } from "./dates.js";
 import { db } from "./db.js";
-import { activeTasksOf, blockedModal, completeCurrentStep, findTask, statusReport } from "./jobs.js";
-import { members, steps, tasks } from "./schema.js";
+import { activeTasksOf, blockedModal, completeCurrentStep, findTask, statusReport, weeklyReport } from "./jobs.js";
+import { dueRequests, members, steps, tasks } from "./schema.js";
 
 type Task = typeof tasks.$inferSelect;
 
@@ -36,6 +36,16 @@ export const assignCommand = new SlashCommandBuilder()
 export const editTaskCommand = new SlashCommandBuilder()
   .setName("과제수정")
   .setDescription("이미 전달한 과제의 남은 단계·마감을 고칩니다 (팀 리더 전용)");
+
+// 담당자가 마감 연장·단축을 요청한다. 팀 리더가 승인해야 바뀐다 (기획안: "담당자가 요청하면 팀 리더가 승인").
+export const dueChangeCommand = new SlashCommandBuilder()
+  .setName("마감변경")
+  .setDescription("과제 최종 마감 변경을 팀 리더님께 요청합니다")
+  .setContexts(InteractionContextType.Guild, InteractionContextType.BotDM);
+
+export const weeklyCommand = new SlashCommandBuilder()
+  .setName("주간리포트")
+  .setDescription("이번 주 완료율·자주 막힌 단계·체크인 응답률을 봅니다 (팀 리더 전용)");
 
 export const statusCommand = new SlashCommandBuilder()
   .setName("현황")
@@ -85,7 +95,7 @@ const ASSIGNEE_HELP = [
   "",
   "**매일 (평일)**",
   "• 09:00 오늘 할 단계를 DM으로 보내 드려요.",
-  "• 18:00 \"오늘 단계는 끝났나요?\" 체크인이 와요. 낮에 `/완료`를 썼어도 다음 단계 기준으로 와요.",
+  "• 17:00 \"오늘 단계는 끝났나요?\" 체크인이 와요. 낮에 `/완료`를 썼어도 다음 단계 기준으로 와요.",
   "  - [완료] 지금 단계를 끝내고 다음 단계를 알려 드려요.",
   "  - [진행 중] 그대로 기록해요. 마감이 빠듯하면 미리 알려 드려요.",
   "  - [막힘] 막힌 곳을 적으면 힌트를 드리고, 팀 리더님께 전달할지 물어봐요.",
@@ -94,7 +104,8 @@ const ASSIGNEE_HELP = [
   "**언제든**",
   "• `/완료` 체크인을 기다리지 않고 지금 단계를 끝냈다고 알려요.",
   "• `/막힘` 막히면 바로 알려요. [막힘] 버튼과 똑같이 힌트를 드리고 전달할지 물어봐요.",
-  "  두 명령 모두 봇과의 DM에서도 쓸 수 있어요.",
+  "• `/마감변경` 최종 마감을 바꾸고 싶으면 날짜와 이유를 적어 팀 리더님께 요청해요. 승인되면 DM으로 알려 드려요.",
+  "  세 명령 모두 봇과의 DM에서도 쓸 수 있어요.",
   "• `/도움말` 이 안내를 다시 봐요.",
   "",
   "DM이 안 오면 서버 개인정보 설정에서 \"서버 멤버가 보내는 다이렉트 메시지 허용\"을 켜 주세요.",
@@ -116,9 +127,13 @@ const LEADER_HELP = [
   "**현황 보기** `/현황` (서버 채널)",
   "• 막힘 · 응답 없음 · 주의 · 순조로움으로 묶어 보여 드려요.",
   "",
+  "**주간 리포트** `/주간리포트` (서버 채널)",
+  "• 이번 주 과제별 완료율, 자주 막힌 단계, 체크인 응답률. 금요일 16:00에는 DM으로도 와요.",
+  "",
   "**자동으로 오는 것**",
   "• 평일 09:00 팀 과제 현황 DM",
   "• 담당자가 막힘 전달에 동의하면 한 줄 요약 DM",
+  "• 담당자의 마감 변경 요청 DM ([승인] [거절])",
   "",
   ASSIGNEE_HELP.replace("**코치 사용 방법 (담당자)**", "**담당자가 받는 안내**"),
 ].join("\n");
@@ -129,8 +144,12 @@ export async function handleHelp(i: ChatInputCommandInteraction) {
   return i.reply({ content: helpText(i.user.id), flags: MessageFlags.Ephemeral });
 }
 
-const isIsoDate = (s: string) =>
-  /^\d{4}-\d{2}-\d{2}$/.test(s) && new Date(`${s}T00:00:00Z`).toISOString().startsWith(s);
+/** 실제로 있는 날짜인지 (2026-02-30, 2026-13-01 같은 값은 false). */
+const isIsoDate = (s: string) => {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(s)) return false;
+  const d = new Date(`${s}T00:00:00Z`);
+  return !Number.isNaN(d.getTime()) && d.toISOString().startsWith(s);
+};
 
 const stepsOf = (taskId: number) =>
   db.select().from(steps).where(eq(steps.taskId, taskId)).orderBy(steps.position).all();
@@ -455,4 +474,138 @@ export async function handleTaskEditModal(i: ModalSubmitInteraction) {
   const reply = { content: notice, components: [], allowedMentions: { parse: [] as never[] } };
   if (i.isFromMessage()) return i.update(reply);
   return i.reply({ ...reply, flags: MessageFlags.Ephemeral });
+}
+
+// ---- 마감 변경 요청 (담당자 → 팀 리더 승인) ----
+
+function dueRequestModal(task: Task) {
+  return new ModalBuilder()
+    .setCustomId(`duereq:${task.id}`)
+    .setTitle(`마감 변경 요청 (지금 ${task.dueDate})`)
+    .addComponents(
+      new ActionRowBuilder<TextInputBuilder>().addComponents(
+        new TextInputBuilder().setCustomId("due").setLabel("바꾸고 싶은 최종 마감 (YYYY-MM-DD)").setStyle(TextInputStyle.Short)
+          .setValue(task.dueDate).setMinLength(10).setMaxLength(10).setRequired(true),
+      ),
+      new ActionRowBuilder<TextInputBuilder>().addComponents(
+        new TextInputBuilder().setCustomId("reason").setLabel("이유 (팀 리더님께 그대로 전달돼요)").setStyle(TextInputStyle.Paragraph)
+          .setMaxLength(300).setRequired(true),
+      ),
+    );
+}
+
+export async function handleDueChangeCommand(i: ChatInputCommandInteraction) {
+  const active = activeTasksOf(i.user.id);
+  if (active.length === 0) {
+    return i.reply({ content: "지금 진행 중인 과제가 없어요.", flags: MessageFlags.Ephemeral });
+  }
+  if (active.length === 1) return i.showModal(dueRequestModal(active[0]));
+  const row = new ActionRowBuilder<ButtonBuilder>().addComponents(
+    active.slice(0, 5).map((t) =>
+      new ButtonBuilder().setCustomId(`dueask:${t.id}`).setLabel(t.title.slice(0, 80)).setStyle(ButtonStyle.Primary),
+    ),
+  );
+  return i.reply({ content: "어느 과제의 마감을 바꾸고 싶나요?", components: [row], flags: MessageFlags.Ephemeral });
+}
+
+export async function handleDueAskButton(i: ButtonInteraction) {
+  const task = findTask(Number(i.customId.split(":")[1]));
+  if (!task || task.assigneeId !== i.user.id || task.status !== "approved") {
+    return i.update({ content: "이 과제는 마감 변경을 요청할 수 없어요.", components: [] });
+  }
+  return i.showModal(dueRequestModal(task));
+}
+
+/** 요청 입력창 제출: 검증 후 요청을 저장하고 팀 리더에게 [승인] [거절] 버튼과 함께 DM한다. */
+export async function handleDueRequestModal(i: ModalSubmitInteraction) {
+  const own = (content: string) => i.reply({ content, flags: MessageFlags.Ephemeral });
+  const task = findTask(Number(i.customId.split(":")[1]));
+  if (!task || task.assigneeId !== i.user.id || task.status !== "approved") {
+    return own("이 과제는 마감 변경을 요청할 수 없어요.");
+  }
+  const newDue = i.fields.getTextInputValue("due").trim();
+  const reason = i.fields.getTextInputValue("reason").trim();
+  if (!isIsoDate(newDue)) return own(`날짜 ${newDue}가 올바르지 않아요. YYYY-MM-DD로 적어 주세요.`);
+  if (newDue < todayKst()) return own("오늘보다 이전 날짜로는 바꿀 수 없어요.");
+  if (newDue === task.dueDate) return own("지금 마감과 같은 날짜예요.");
+  const pending = db.select().from(dueRequests)
+    .where(and(eq(dueRequests.taskId, task.id), eq(dueRequests.status, "pending"))).get();
+  if (pending) return own(`이미 ${pending.newDue}로 바꾸는 요청이 팀 리더님 확인을 기다리고 있어요.`);
+
+  const req = db.insert(dueRequests)
+    .values({ taskId: task.id, oldDue: task.dueDate, newDue, reason }).returning().get();
+  try {
+    const leader = await i.client.users.fetch(config.LEADER_ID);
+    await leader.send({
+      content:
+        `📅 <@${task.assigneeId}> 마감 변경 요청\n[${task.title}] ${task.dueDate} → **${newDue}**\n> ${reason.replace(/\n/g, "\n> ")}\n\n남은 단계:\n` +
+        stepLines(stepsOf(task.id).filter((s) => !s.done)),
+      components: [
+        new ActionRowBuilder<ButtonBuilder>().addComponents(
+          new ButtonBuilder().setCustomId(`duedecide:${req.id}:yes`).setLabel("승인").setStyle(ButtonStyle.Success),
+          new ButtonBuilder().setCustomId(`duedecide:${req.id}:no`).setLabel("거절").setStyle(ButtonStyle.Secondary),
+        ),
+      ],
+      allowedMentions: { parse: [] },
+    });
+  } catch (err) {
+    console.error(`마감 변경 요청 DM 실패 req=${req.id}`, err);
+    db.delete(dueRequests).where(eq(dueRequests.id, req.id)).run();
+    return own("팀 리더님께 요청을 보내지 못했어요. 잠시 뒤 다시 시도하거나 직접 말씀해 주세요.");
+  }
+  return own(`팀 리더님께 [${task.title}] 마감을 ${newDue}로 바꾸는 요청을 보냈어요. 결과는 DM으로 알려 드릴게요.`);
+}
+
+/**
+ * 팀 리더의 [승인] [거절]. 승인하면 마감을 바꾸고, 남은 단계 중 새 마감보다 늦거나
+ * 예전 마감에 맞춰 있던 단계는 새 마감으로 옮긴다. 결과는 담당자에게 DM한다.
+ */
+export async function handleDueDecision(i: ButtonInteraction) {
+  if (i.user.id !== config.LEADER_ID) {
+    return i.reply({ content: "팀 리더만 할 수 있어요.", flags: MessageFlags.Ephemeral });
+  }
+  const [, id, answer] = i.customId.split(":");
+  const req = db.select().from(dueRequests).where(eq(dueRequests.id, Number(id))).get();
+  const task = req && findTask(req.taskId);
+  if (!req || req.status !== "pending" || !task || task.status !== "approved") {
+    return i.update({ content: `${i.message.content}\n\n이미 처리됐거나 끝난 과제의 요청이에요.`, components: [] });
+  }
+
+  let toAssignee: string;
+  let note: string;
+  if (answer === "yes") {
+    db.transaction((tx) => {
+      tx.update(tasks).set({ dueDate: req.newDue }).where(eq(tasks.id, task.id)).run();
+      for (const s of tx.select().from(steps).where(and(eq(steps.taskId, task.id), eq(steps.done, false))).all()) {
+        if (s.dueDate > req.newDue || s.dueDate === req.oldDue) {
+          tx.update(steps).set({ dueDate: req.newDue }).where(eq(steps.id, s.id)).run();
+        }
+      }
+      tx.update(dueRequests).set({ status: "approved" }).where(eq(dueRequests.id, req.id)).run();
+    });
+    const open = stepsOf(task.id).filter((s) => !s.done);
+    toAssignee =
+      `✅ 마감 변경이 승인됐어요: [${task.title}] ${req.oldDue} → ${req.newDue}\n남은 단계:\n` +
+      stepLines(open, stepsOf(task.id).length - open.length + 1);
+    note = "✅ 승인했어요. 단계 일정을 더 고치려면 `/과제수정`을 쓰세요.";
+  } else {
+    db.update(dueRequests).set({ status: "rejected" }).where(eq(dueRequests.id, req.id)).run();
+    toAssignee = `[${task.title}] 마감 변경(${req.newDue})은 이번에는 어렵대요. 마감은 ${task.dueDate} 그대로예요. 팀 리더님과 직접 이야기해 보세요.`;
+    note = "거절했어요. 담당자에게 알렸어요.";
+  }
+  try {
+    const user = await i.client.users.fetch(task.assigneeId);
+    await user.send(toAssignee);
+  } catch (err) {
+    console.error(`마감 변경 결과 DM 실패 req=${req.id}`, err);
+    note += " (담당자에게 DM을 보내지 못했어요.)";
+  }
+  return i.update({ content: `${i.message.content}\n\n${note}`, components: [], allowedMentions: { parse: [] } });
+}
+
+export async function handleWeekly(i: ChatInputCommandInteraction) {
+  if (i.user.id !== config.LEADER_ID) {
+    return i.reply({ content: "팀 리더만 볼 수 있어요.", flags: MessageFlags.Ephemeral });
+  }
+  return i.reply({ content: weeklyReport(), flags: MessageFlags.Ephemeral, allowedMentions: { parse: [] } });
 }
