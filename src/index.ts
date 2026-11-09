@@ -5,6 +5,7 @@ import {
   handleAssign,
   handleButton,
   handleDone,
+  handleEditDraftModal,
   handleSelfDoneButton,
   handleStatus,
   statusCommand,
@@ -48,6 +49,7 @@ client.on(Events.InteractionCreate, async (i) => {
     else if (i.isButton() && i.customId.startsWith("share:")) await handleShareButton(i);
     else if (i.isButton()) await handleButton(i);
     else if (i.isModalSubmit() && i.customId.startsWith("blocked:")) await handleBlockedModal(i);
+    else if (i.isModalSubmit() && i.customId.startsWith("editdraft:")) await handleEditDraftModal(i);
   } catch (err) {
     console.error(err);
     const msg = "처리 중 오류가 났어요. 잠시 뒤 다시 시도해 주세요.";

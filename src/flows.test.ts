@@ -317,3 +317,113 @@ describe("/현황과 아침 요약", () => {
     expect(sent.size).toBe(0);
   });
 });
+
+describe("초안 수정과 취소", () => {
+  /** 초안만 만들고(승인 전) 과제 ID와 리더가 받은 메시지를 돌려준다. */
+  async function draftOnly() {
+    const i = slash(LEADER, { 내용: "버튼 컴포넌트 만들기", 마감: "2026-11-13" });
+    await commands.handleAssign(i);
+    const draft = i.editReply.mock.calls[0][0];
+    return { id: Number(customIds(draft)[0].split(":")[1]), draft };
+  }
+  function editModal(userId: string, id: number, fields: Record<string, string>) {
+    return {
+      user: { id: userId },
+      client,
+      customId: `editdraft:${id}`,
+      fields: { getTextInputValue: (k: string) => fields[k] },
+      isFromMessage: () => true,
+      reply: vi.fn(async () => {}),
+      update: vi.fn(async () => {}),
+    } as any;
+  }
+
+  it("초안에 [이대로 전달] [수정] [취소] 버튼이 붙는다", async () => {
+    const { id, draft } = await draftOnly();
+    expect(customIds(draft)).toEqual([`approve:${id}`, `edit:${id}`, `cancel:${id}`]);
+  });
+
+  it("[수정]은 지금 초안이 채워진 입력창을 띄운다", async () => {
+    const { id } = await draftOnly();
+    const b = button(LEADER, `edit:${id}`);
+    await commands.handleButton(b);
+    const fields = b.showModal.mock.calls[0][0].toJSON().components.map((r: any) => r.components[0]);
+    expect(fields.map((f: any) => f.value)).toEqual([
+      "버튼 컴포넌트 3종",
+      "2026-11-13",
+      "1. props 설계 - 2026-11-05\n2. 스타일 구현 - 2026-11-09\n3. Storybook 문서 - 2026-11-13",
+    ]);
+  });
+
+  it("수정 내용을 저장하고 초안 메시지를 새로 그린다", async () => {
+    const { id } = await draftOnly();
+    const m = editModal(LEADER, id, {
+      title: "버튼 컴포넌트",
+      due: "2026-11-20",
+      steps: "props·API 설계 - 2026-11-06\nPrimary-Secondary 스타일 - 2026-11-12\n\nStorybook 문서 - 2026-11-18\n리뷰 반영 - 2026-11-20",
+    });
+    await commands.handleEditDraftModal(m);
+    const t = jobs.findTask(id)!;
+    expect([t.title, t.dueDate, t.status]).toEqual(["버튼 컴포넌트", "2026-11-20", "draft"]);
+    expect(stepsOf(id).map((s) => [s.position, s.title, s.dueDate])).toEqual([
+      [1, "props·API 설계", "2026-11-06"],
+      [2, "Primary-Secondary 스타일", "2026-11-12"],
+      [3, "Storybook 문서", "2026-11-18"],
+      [4, "리뷰 반영", "2026-11-20"],
+    ]);
+    const updated = m.update.mock.calls[0][0];
+    expect(updated.content).toContain("2. Primary-Secondary 스타일 - 2026-11-12");
+    expect(customIds(updated)).toEqual([`approve:${id}`, `edit:${id}`, `cancel:${id}`]);
+  });
+
+  it("형식이 틀리면 초안을 그대로 두고 틀린 줄을 알려 준다", async () => {
+    const { id } = await draftOnly();
+    const m = editModal(LEADER, id, {
+      title: "x",
+      due: "2026-11-13",
+      steps: "설계 - 2026-11-05\n구현 2026-11-09\n문서 - 2026-02-30\n리뷰 - 2026-11-20",
+    });
+    await commands.handleEditDraftModal(m);
+    const msg = m.reply.mock.calls[0][0].content;
+    expect(msg).toContain("2번째 줄");
+    expect(msg).toContain("2026-02-30");
+    expect(msg).toContain("최종 마감 2026-11-13보다 늦어요");
+    expect(stepsOf(id)).toHaveLength(3);
+    expect(jobs.findTask(id)!.title).toBe("버튼 컴포넌트 3종");
+  });
+
+  it("[취소]는 초안을 지우고 담당자에게 아무것도 보내지 않는다", async () => {
+    const { id } = await draftOnly();
+    const b = button(LEADER, `cancel:${id}`);
+    await commands.handleButton(b);
+    expect(jobs.findTask(id)).toBeUndefined();
+    expect(stepsOf(id)).toHaveLength(0);
+    expect(dmsTo(INTERN)).toHaveLength(0);
+    expect(b.update.mock.calls[0][0].content).toContain("초안을 취소했어요");
+  });
+
+  it("팀 리더가 아니면 수정·취소할 수 없다", async () => {
+    const { id } = await draftOnly();
+    for (const action of ["edit", "cancel"]) {
+      const b = button(OTHER, `${action}:${id}`);
+      await commands.handleButton(b);
+      expect(b.reply).toHaveBeenCalled();
+    }
+    const m = editModal(OTHER, id, { title: "x", due: "2026-11-13", steps: "a - 2026-11-05" });
+    await commands.handleEditDraftModal(m);
+    expect(m.reply).toHaveBeenCalled();
+    expect(jobs.findTask(id)!.title).toBe("버튼 컴포넌트 3종");
+  });
+
+  it("이미 전달한 초안의 버튼을 다시 누르면 아무 일도 하지 않는다", async () => {
+    const { id } = await draftOnly();
+    await commands.handleButton(button(LEADER, `approve:${id}`));
+    for (const action of ["approve", "edit", "cancel"]) {
+      const b = button(LEADER, `${action}:${id}`);
+      await commands.handleButton(b);
+      expect(b.update.mock.calls[0][0].content).toContain("이미 처리된 초안");
+    }
+    expect(dmsTo(INTERN)).toHaveLength(1); // 담당자 DM은 한 번만
+    expect(jobs.findTask(id)!.status).toBe("approved");
+  });
+});
