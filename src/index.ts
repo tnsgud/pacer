@@ -6,8 +6,10 @@ import {
   handleButton,
   handleDone,
   handleEditDraftModal,
+  handleHelp,
   handleSelfDoneButton,
   handleStatus,
+  helpCommand,
   statusCommand,
 } from "./commands.js";
 import { config } from "./config.js";
@@ -27,11 +29,11 @@ const client = new Client({ intents: [GatewayIntentBits.Guilds] });
 
 client.once(Events.ClientReady, async (c) => {
   const rest = new REST().setToken(config.DISCORD_TOKEN);
-  // /과제는 팀 서버 전용, /완료는 봇 DM에서도 쓰도록 전역 등록
+  // /과제는 팀 서버 전용, /완료·/도움말은 봇 DM에서도 쓰도록 전역 등록
   await rest.put(Routes.applicationGuildCommands(config.DISCORD_APP_ID, config.DISCORD_GUILD_ID), {
     body: [assignCommand.toJSON(), statusCommand.toJSON()],
   });
-  await rest.put(Routes.applicationCommands(config.DISCORD_APP_ID), { body: [doneCommand.toJSON()] });
+  await rest.put(Routes.applicationCommands(config.DISCORD_APP_ID), { body: [doneCommand.toJSON(), helpCommand.toJSON()] });
   scheduleJobs(c);
   console.log(`logged in as ${c.user.tag}`);
   // 테스트용: npm run dev -- --checkin-now / --morning-now 이면 해당 발송을 바로 한 번 실행한다.
@@ -44,6 +46,7 @@ client.on(Events.InteractionCreate, async (i) => {
     if (i.isChatInputCommand() && i.commandName === "과제") await handleAssign(i);
     else if (i.isChatInputCommand() && i.commandName === "완료") await handleDone(i);
     else if (i.isChatInputCommand() && i.commandName === "현황") await handleStatus(i);
+    else if (i.isChatInputCommand() && i.commandName === "도움말") await handleHelp(i);
     else if (i.isButton() && i.customId.startsWith("checkin:")) await handleCheckinButton(i);
     else if (i.isButton() && i.customId.startsWith("selfdone:")) await handleSelfDoneButton(i);
     else if (i.isButton() && i.customId.startsWith("share:")) await handleShareButton(i);

@@ -427,3 +427,23 @@ describe("초안 수정과 취소", () => {
     expect(jobs.findTask(id)!.status).toBe("approved");
   });
 });
+
+describe("/도움말", () => {
+  it("팀 리더에게는 리더용과 담당자용 안내를, 담당자에게는 담당자용만 보여 준다", async () => {
+    const leader = slash(LEADER);
+    await commands.handleHelp(leader);
+    const l = leader.reply.mock.calls[0][0].content;
+    expect(l).toContain("/과제");
+    expect(l).toContain("/현황");
+    expect(l).toContain("/완료");
+
+    const intern = slash(INTERN);
+    await commands.handleHelp(intern);
+    const a = intern.reply.mock.calls[0][0].content;
+    expect(a).toContain("/완료");
+    expect(a).not.toContain("/과제");
+    expect(intern.reply.mock.calls[0][0].flags).toBeDefined(); // 본인에게만
+
+    for (const text of [l, a]) expect(text.length).toBeLessThanOrEqual(2000); // Discord 메시지 한도
+  });
+});

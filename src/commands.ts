@@ -39,6 +39,54 @@ export const doneCommand = new SlashCommandBuilder()
   .setDescription("지금 단계를 끝냈다고 코치에게 알립니다")
   .setContexts(InteractionContextType.Guild, InteractionContextType.BotDM);
 
+export const helpCommand = new SlashCommandBuilder()
+  .setName("도움말")
+  .setDescription("코치 봇 사용 방법을 봅니다")
+  .setContexts(InteractionContextType.Guild, InteractionContextType.BotDM);
+
+const ASSIGNEE_HELP = [
+  "**코치 사용 방법 (담당자)**",
+  "",
+  "**매일 (평일)**",
+  "• 09:00 오늘 할 단계를 DM으로 보내 드려요.",
+  "• 18:00 \"오늘 단계는 끝났나요?\" 체크인이 와요.",
+  "  - [완료] 지금 단계를 끝내고 다음 단계를 알려 드려요.",
+  "  - [진행 중] 그대로 기록해요. 마감이 빠듯하면 미리 알려 드려요.",
+  "  - [막힘] 막힌 곳을 적으면 힌트를 드리고, 팀 리더님께 전달할지 물어봐요.",
+  "    동의할 때만 한 줄 요약이 가고, 대화 원문은 가지 않아요.",
+  "",
+  "**언제든**",
+  "• `/완료` 체크인을 기다리지 않고 지금 단계를 끝냈다고 알려요. DM에서도 돼요.",
+  "• `/도움말` 이 안내를 다시 봐요.",
+  "",
+  "DM이 안 오면 서버 개인정보 설정에서 \"서버 멤버가 보내는 다이렉트 메시지 허용\"을 켜 주세요.",
+].join("\n");
+
+const LEADER_HELP = [
+  "**코치 사용 방법 (팀 리더)**",
+  "",
+  "**과제 맡기기** `/과제` (서버 채널)",
+  "• 담당자, 내용, 마감(`2026-11-13`)을 넣으면 AI 단계 초안이 본인에게만 보여요.",
+  "• [이대로 전달] 담당자에게 DM으로 보내요.",
+  "• [수정] 제목·마감·단계를 직접 고쳐요. 단계는 한 줄에 하나씩 `제목 - 2026-11-05`.",
+  "• [취소] 초안을 지워요. 담당자에게는 아무것도 가지 않아요.",
+  "",
+  "**현황 보기** `/현황` (서버 채널)",
+  "• 막힘 · 응답 없음 · 주의 · 순조로움으로 묶어 보여 드려요.",
+  "",
+  "**자동으로 오는 것**",
+  "• 평일 09:00 팀 과제 현황 DM",
+  "• 담당자가 막힘 전달에 동의하면 한 줄 요약 DM",
+  "",
+  ASSIGNEE_HELP.replace("**코치 사용 방법 (담당자)**", "**담당자가 받는 안내**"),
+].join("\n");
+
+export const helpText = (userId: string) => (userId === config.LEADER_ID ? LEADER_HELP : ASSIGNEE_HELP);
+
+export async function handleHelp(i: ChatInputCommandInteraction) {
+  return i.reply({ content: helpText(i.user.id), flags: MessageFlags.Ephemeral });
+}
+
 const isIsoDate = (s: string) =>
   /^\d{4}-\d{2}-\d{2}$/.test(s) && new Date(`${s}T00:00:00Z`).toISOString().startsWith(s);
 
