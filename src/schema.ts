@@ -21,6 +21,10 @@ export const tasks = sqliteTable("tasks", {
   status: text("status", { enum: ["draft", "approved", "done"] })
     .notNull()
     .default("draft"),
+  // 성공 기준 측정용 기록
+  draftEdits: integer("draft_edits").default(0), // 전달 전 초안 [수정] 횟수. 여러 명에게 복사된 과제는 null(원본만 셈)
+  completedAt: text("completed_at"), // 마지막 단계를 끝낸 날 (KST)
+  riskWarnedAt: text("risk_warned_at"), // 팀 리더가 처음 "주의"로 본 날 (아침 요약·/현황)
   createdAt: createdAt(),
 });
 
@@ -48,6 +52,7 @@ export const checkins = sqliteTable(
     summary: text("summary"),
     // 담당자가 "팀 리더님께 전달"에 동의했을 때만 true. true일 때만 summary를 리더에게 보여 준다.
     shared: integer("shared", { mode: "boolean" }).notNull().default(false),
+    leaderSeenAt: text("leader_seen_at"), // 팀 리더가 이 막힘을 처음 안 날 (전달 동의 DM·아침 요약·/현황)
     createdAt: createdAt(),
   },
   (t) => [unique().on(t.taskId, t.memberId, t.date)],

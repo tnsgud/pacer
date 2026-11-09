@@ -10,7 +10,7 @@ import {
   TextInputBuilder,
   TextInputStyle,
 } from "discord.js";
-import { and, asc, desc, eq } from "drizzle-orm";
+import { and, asc, desc, eq, isNull } from "drizzle-orm";
 import cron from "node-cron";
 import { coachBlocked } from "./ai.js";
 import { config } from "./config.js";
@@ -38,7 +38,7 @@ export function completeCurrentStep(task: Task): string {
   db.update(steps).set({ done: true, doneAt: todayKst() }).where(eq(steps.id, step.id)).run();
   saveCheckin(task, "done", null, step.title); // 현황의 "마지막 체크인"에 반영
   if (!next) {
-    db.update(tasks).set({ status: "done" }).where(eq(tasks.id, task.id)).run();
+    db.update(tasks).set({ status: "done", completedAt: todayKst() }).where(eq(tasks.id, task.id)).run();
     return `🎉 마지막 단계까지 끝냈어요! [${task.title}] 완료입니다. 정말 수고했어요.`;
   }
   const ahead = businessDaysBetween(todayKst(), step.dueDate);
@@ -61,11 +61,24 @@ export { findTask };
 const mmdd = (iso: string) => `${Number(iso.slice(5, 7))}/${Number(iso.slice(8, 10))}`;
 const STATUS_LABEL = { done: "완료", doing: "진행 중", blocked: "막힘" } as const;
 
+/** 팀 리더가 현황에서 처음 본 막힘 체크인·주의 과제. 보낸 뒤에 markLeaderSeen으로 기록한다(성공 기준 측정용). */
+export type Seen = { blockedCheckinIds: number[]; riskTaskIds: number[] };
+
+export function markLeaderSeen(seen: Seen, today = todayKst()) {
+  for (const id of seen.blockedCheckinIds) {
+    db.update(checkins).set({ leaderSeenAt: today }).where(and(eq(checkins.id, id), isNull(checkins.leaderSeenAt))).run();
+  }
+  for (const id of seen.riskTaskIds) {
+    db.update(tasks).set({ riskWarnedAt: today }).where(and(eq(tasks.id, id), isNull(tasks.riskWarnedAt))).run();
+  }
+}
+
 /**
  * 팀 리더용 현황. /현황과 아침 요약이 함께 쓴다.
  * 막힘 요약 문구는 담당자가 전달에 동의한 경우(shared)에만 붙인다.
+ * seen을 넘기면 이 현황에 들어간 막힘 체크인과 주의 과제를 모아 준다.
  */
-export function statusReport(today = todayKst()): string {
+export function statusReport(today = todayKst(), seen?: Seen): string {
   const groups = { 막힘: [] as string[], "응답 없음": [] as string[], 주의: [] as string[], 순조로움: [] as string[] };
   for (const task of db.select().from(tasks).where(eq(tasks.status, "approved")).all()) {
     const all = db.select().from(steps).where(eq(steps.taskId, task.id)).orderBy(asc(steps.position)).all();
@@ -93,10 +106,14 @@ export function statusReport(today = todayKst()): string {
       (pending ? `, 📅 마감 변경 요청 ${mmdd(pending.newDue)} 대기` : "") +
       (last?.status === "blocked" && last.shared && last.summary ? `\n  └ ${last.summary}` : "");
 
-    if (last?.status === "blocked") groups.막힘.push(line);
-    else if (businessDaysBetween(since, today) >= 2) groups["응답 없음"].push(line);
-    else if (risk.atRisk || (step && step.dueDate < today)) groups.주의.push(line);
-    else groups.순조로움.push(line);
+    if (last?.status === "blocked") {
+      groups.막힘.push(line);
+      seen?.blockedCheckinIds.push(last.id);
+    } else if (businessDaysBetween(since, today) >= 2) groups["응답 없음"].push(line);
+    else if (risk.atRisk || (step && step.dueDate < today)) {
+      groups.주의.push(line);
+      seen?.riskTaskIds.push(task.id);
+    } else groups.순조로움.push(line);
   }
 
   const total = Object.values(groups).reduce((n, g) => n + g.length, 0);
@@ -243,7 +260,7 @@ export async function handleShareButton(i: ButtonInteraction) {
   }
   const checkin = db
     .update(checkins)
-    .set({ shared: true })
+    .set({ shared: true, leaderSeenAt: todayKst() })
     .where(and(eq(checkins.taskId, task.id), eq(checkins.date, todayKst()), eq(checkins.status, "blocked")))
     .returning()
     .get();
@@ -260,13 +277,24 @@ export async function handleShareButton(i: ButtonInteraction) {
 
 // ---- 아침: 팀 리더 요약 DM + 담당자 오늘 할 단계 안내 ----
 
+/** 담당자 아침 DM에 붙이는 마감 경고. 늦어진 단계가 있거나 남은 단계가 남은 영업일보다 많을 때. */
+function morningRiskNote(task: Task, today: string): string {
+  const open = openSteps(task.id);
+  const risk = deadlineRisk(open.length, today, task.dueDate);
+  if (risk.atRisk) return `\n⚠️ 마감이 빠듯해요 (${risk.reason}). 어려우면 /마감변경 으로 팀 리더님께 요청하세요.`;
+  if (open[0] && open[0].dueDate < today) return `\n⚠️ 지금 단계 목표일(${mmdd(open[0].dueDate)})이 지났어요. 막혔다면 /막힘 으로 알려 주세요.`;
+  return "";
+}
+
 export async function sendMorning(client: Client) {
   const today = todayKst();
   if (!isBusinessDate(today)) return;
 
   try {
+    const seen: Seen = { blockedCheckinIds: [], riskTaskIds: [] };
     const leader = await client.users.fetch(config.LEADER_ID);
-    await leader.send({ content: statusReport(today), allowedMentions: { parse: [] } });
+    await leader.send({ content: statusReport(today, seen), allowedMentions: { parse: [] } });
+    markLeaderSeen(seen, today);
   } catch (err) {
     console.error("팀 리더 아침 요약 DM 실패", err);
   }
@@ -279,7 +307,8 @@ export async function sendMorning(client: Client) {
       await user.send(
         `좋은 아침이에요! [${task.title}]\n` +
           `오늘 할 단계: ${step.position}. ${step.title} (목표 ${mmdd(step.dueDate)})\n` +
-          `최종 마감 ${mmdd(task.dueDate)}까지 영업일 ${businessDaysBetween(today, task.dueDate)}일. 끝나면 /완료 로 알려 주세요.`,
+          `최종 마감 ${mmdd(task.dueDate)}까지 영업일 ${businessDaysBetween(today, task.dueDate)}일. 끝나면 /완료 로 알려 주세요.` +
+          morningRiskNote(task, today),
       );
     } catch (err) {
       console.error(`아침 안내 DM 실패 task=${task.id}`, err);
@@ -340,23 +369,13 @@ export function weeklyReport(today = todayKst()): string {
     : "**자주 막힌 단계**: 이번 주 막힘 없음");
 
   // 3) 체크인 응답률 (운영 지표, 목표 80%)
-  const rateLines: string[] = [];
-  for (const m of db.select().from(members).all()) {
-    const mine = db.select().from(tasks).where(eq(tasks.assigneeId, m.id)).all().filter((t) => t.status !== "draft");
-    if (mine.length === 0) continue;
-    const answered = new Set(weekCheckins.filter(({ c }) => c.memberId === m.id).map(({ c }) => c.date));
-    let asked = 0;
-    let replied = 0;
-    for (let d = monday; d <= today; d = addDays(d, 1)) {
-      if (!isBusinessDate(d)) continue;
-      if (!mine.some((t) => t.createdAt.slice(0, 10) <= d)) continue;
-      if (d === today && !answered.has(d)) continue;
-      asked++;
-      if (answered.has(d)) replied++;
-    }
-    if (asked) rateLines.push(`• <@${m.id}> ${replied}/${asked}일 (${Math.round((replied / asked) * 100)}%)`);
-  }
+  const rateLines = responseRates(monday, today).map(
+    (r) => `• <@${r.memberId}> ${r.replied}/${r.asked}일 (${pct(r.replied, r.asked)}%)`,
+  );
   lines.push(rateLines.length ? `**체크인 응답률** (목표 80%)\n${rateLines.join("\n")}` : "**체크인 응답률**: 해당 없음");
+
+  // 4) 성공 기준 누적 (운영 시작일부터)
+  lines.push(successReport(today));
 
   const text = lines.join("\n\n");
   return text.length > DISCORD_LIMIT ? `${text.slice(0, DISCORD_LIMIT - 10)}\n…(생략)` : text;
@@ -365,4 +384,79 @@ export function weeklyReport(today = todayKst()): string {
 export async function sendWeekly(client: Client) {
   const leader = await client.users.fetch(config.LEADER_ID);
   await leader.send({ content: weeklyReport(), allowedMentions: { parse: [] } });
+}
+
+const pct = (n: number, d: number) => (d ? Math.round((n / d) * 100) : 0);
+
+/**
+ * 사람별 체크인 응답률. 분모는 [from, today] 중 과제를 받은 뒤의 영업일.
+ * 오늘은 이미 답했을 때만 센다(리포트가 17:00 체크인보다 먼저 나갈 수 있어서).
+ */
+function responseRates(from: string, today: string) {
+  const result: { memberId: string; asked: number; replied: number }[] = [];
+  for (const m of db.select().from(members).all()) {
+    const mine = db.select().from(tasks).where(eq(tasks.assigneeId, m.id)).all().filter((t) => t.status !== "draft");
+    if (mine.length === 0) continue;
+    const answered = new Set(
+      db.select({ date: checkins.date }).from(checkins).where(eq(checkins.memberId, m.id)).all().map((c) => c.date),
+    );
+    const firstDay = mine.map((t) => t.createdAt.slice(0, 10)).sort()[0];
+    let asked = 0;
+    let replied = 0;
+    for (let d = from > firstDay ? from : firstDay; d <= today; d = addDays(d, 1)) {
+      if (!isBusinessDate(d)) continue;
+      if (!mine.some((t) => t.createdAt.slice(0, 10) <= d)) continue;
+      if (d === today && !answered.has(d)) continue;
+      asked++;
+      if (answered.has(d)) replied++;
+    }
+    if (asked) result.push({ memberId: m.id, asked, replied });
+  }
+  return result;
+}
+
+/**
+ * 기획안 섹션 5-2 성공 기준을 운영 시작일(METRICS_SINCE, 없으면 전체 기간)부터 누적으로 계산한다.
+ * 봇 밖에서 재야 하는 것("어디까지 했어?" 횟수, 설문)은 넣지 않는다.
+ */
+export function successReport(today = todayKst()): string {
+  const since = config.METRICS_SINCE ?? "0000-01-01";
+  const created = (t: Task) => t.createdAt.slice(0, 10) >= since;
+  const mark = (ok: boolean) => (ok ? "✅" : "❌");
+  const all = db.select().from(tasks).all().filter((t) => t.status !== "draft" && created(t));
+  const out: string[] = [`**성공 기준** (${config.METRICS_SINCE ? `${mmdd(since)}부터` : "전체 기간"})`];
+
+  // 1) 초안의 80% 이상이 수정 1회 이내로 확정 (복사본은 빼고 원본만)
+  const drafts = all.filter((t) => t.draftEdits !== null);
+  const fewEdits = drafts.filter((t) => (t.draftEdits ?? 0) <= 1).length;
+  out.push(drafts.length
+    ? `${mark(pct(fewEdits, drafts.length) >= 80)} 초안 수정 1회 이내 확정 ${fewEdits}/${drafts.length} (${pct(fewEdits, drafts.length)}%, 목표 80%)`
+    : "➖ 초안 수정 1회 이내 확정: 아직 전달한 초안 없음");
+
+  // 2) 체크인 응답률 80% 이상 (사람별)
+  const rates = responseRates(since, today);
+  out.push(rates.length
+    ? `${mark(rates.every((r) => pct(r.replied, r.asked) >= 80))} 체크인 응답률 ` +
+        rates.map((r) => `<@${r.memberId}> ${pct(r.replied, r.asked)}%`).join(", ") + " (목표 80%)"
+    : "➖ 체크인 응답률: 아직 기록 없음");
+
+  // 3) 막힘이 생긴 뒤 팀 리더가 알기까지 1영업일 이내
+  const blocked = db.select().from(checkins).all().filter((c) => c.status === "blocked" && c.date >= since);
+  const decided = blocked.filter((c) => c.leaderSeenAt || businessDaysBetween(c.date, today) > 1);
+  const inTime = decided.filter((c) => c.leaderSeenAt && businessDaysBetween(c.date, c.leaderSeenAt) <= 1).length;
+  out.push(decided.length
+    ? `${mark(inTime === decided.length)} 막힘 1영업일 이내 리더 인지 ${inTime}/${decided.length} (목표 전부)`
+    : "➖ 막힘 1영업일 이내 리더 인지: 아직 막힘 없음");
+
+  // 4) 마감 놓친 과제 0건, 놓칠 것 같으면 최소 2영업일 전에 경고
+  const missed = all.filter((t) =>
+    (t.status === "done" && (t.completedAt ?? "") > t.dueDate) || (t.status === "approved" && t.dueDate < today));
+  const warnedEarly = missed.filter((t) => t.riskWarnedAt && businessDaysBetween(t.riskWarnedAt, t.dueDate) >= 2).length;
+  out.push(
+    `${mark(missed.length === 0)} 마감 놓친 과제 ${missed.length}건 (목표 0건)` +
+      (missed.length
+        ? `, 2영업일 전 경고 ${warnedEarly}/${missed.length}\n` + missed.slice(0, 3).map((t) => `  └ <@${t.assigneeId}> ${t.title} (마감 ${mmdd(t.dueDate)})`).join("\n")
+        : ""),
+  );
+  return out.join("\n");
 }

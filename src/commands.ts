@@ -17,7 +17,17 @@ import { draftSteps } from "./ai.js";
 import { config } from "./config.js";
 import { todayKst } from "./dates.js";
 import { db } from "./db.js";
-import { activeTasksOf, blockedModal, completeCurrentStep, findTask, statusReport, weeklyReport } from "./jobs.js";
+import {
+  activeTasksOf,
+  blockedModal,
+  completeCurrentStep,
+  findTask,
+  markLeaderSeen,
+  type Seen,
+  statusReport,
+  successReport,
+  weeklyReport,
+} from "./jobs.js";
 import { dueRequests, members, steps, tasks } from "./schema.js";
 
 type Task = typeof tasks.$inferSelect;
@@ -46,6 +56,10 @@ export const dueChangeCommand = new SlashCommandBuilder()
 export const weeklyCommand = new SlashCommandBuilder()
   .setName("주간리포트")
   .setDescription("이번 주 완료율·자주 막힌 단계·체크인 응답률을 봅니다 (팀 리더 전용)");
+
+export const successCommand = new SlashCommandBuilder()
+  .setName("성공기준")
+  .setDescription("기획안 성공 기준 달성 현황을 봅니다 (팀 리더 전용)");
 
 export const statusCommand = new SlashCommandBuilder()
   .setName("현황")
@@ -122,13 +136,16 @@ const LEADER_HELP = [
   "• [취소] 초안을 지워요. 담당자에게는 아무것도 가지 않아요.",
   "",
   "**전달한 과제 고치기** `/과제수정` (서버 채널)",
-  "• 과제를 고르면 남은 단계·마감·제목을 고칠 수 있어요. 끝난 단계는 그대로 두고, 담당자에게 바뀐 내용을 DM으로 알려요.",
+  "• 과제를 고르면 남은 단계·마감·제목을 고칠 수 있어요. 끝난 단계는 그대로 두고, 담당자에게 바뀐 점을 DM으로 알려요.",
   "",
   "**현황 보기** `/현황` (서버 채널)",
   "• 막힘 · 응답 없음 · 주의 · 순조로움으로 묶어 보여 드려요.",
   "",
   "**주간 리포트** `/주간리포트` (서버 채널)",
   "• 이번 주 과제별 완료율, 자주 막힌 단계, 체크인 응답률. 금요일 16:00에는 DM으로도 와요.",
+  "",
+  "**성공 기준** `/성공기준` (서버 채널)",
+  "• 초안 수정 횟수, 체크인 응답률, 막힘 인지 시간, 마감 놓친 과제를 기획안 목표와 비교해요. 주간 리포트에도 붙어요.",
   "",
   "**자동으로 오는 것**",
   "• 평일 09:00 팀 과제 현황 DM",
@@ -211,6 +228,69 @@ function editModal(task: Task) {
     );
 }
 
+type StepLike = { title: string; dueDate: string };
+const md = (iso: string) => `${Number(iso.slice(5, 7))}/${Number(iso.slice(8, 10))}`;
+
+/**
+ * 과제 수정 전후를 비교해 "바뀐 점" 줄과, 바뀐 줄에 ✏️·🆕를 붙인 남은 단계 목록을 만든다.
+ * 단계는 이름으로 짝짓는다. 짝이 없는 이전·새 단계가 같은 번호 자리에 있으면 "이름 변경"으로 묶는다.
+ * 순서만 바뀐 것은 적지 않는다(넣고 빼면 번호가 밀려 너무 길어져서). start는 남은 단계의 첫 번호.
+ */
+export function diffTask(
+  before: { title: string; dueDate: string; steps: StepLike[] },
+  after: { title: string; dueDate: string; steps: StepLike[] },
+  start: number,
+) {
+  const changes: string[] = [];
+  const mark: string[] = after.steps.map(() => "");
+  if (before.title !== after.title) changes.push(`과제 제목: ${before.title} → ${after.title}`);
+  if (before.dueDate !== after.dueDate) changes.push(`최종 마감: ${md(before.dueDate)} → ${md(after.dueDate)}`);
+
+  const usedOld = new Set<number>();
+  const pairOf = after.steps.map((n) => {
+    const o = before.steps.findIndex((b, idx) => !usedOld.has(idx) && b.title === n.title);
+    if (o >= 0) usedOld.add(o);
+    return o;
+  });
+  // 같은 자리에 남은 짝 없는 이전·새 단계 → 이름 변경
+  after.steps.forEach((_, j) => {
+    if (pairOf[j] < 0 && j < before.steps.length && !usedOld.has(j)) {
+      pairOf[j] = j;
+      usedOld.add(j);
+      mark[j] = "rename";
+    }
+  });
+  after.steps.forEach((n, j) => {
+    const num = start + j;
+    const o = pairOf[j];
+    if (o < 0) {
+      changes.push(`새 단계: ${num}. ${n.title} (${md(n.dueDate)})`);
+      mark[j] = " 🆕";
+      return;
+    }
+    const old = before.steps[o];
+    const dateNote = old.dueDate !== n.dueDate ? `목표일 ${md(old.dueDate)} → ${md(n.dueDate)}` : "";
+    if (mark[j] === "rename") {
+      changes.push(`이름 변경: ${num}. ${old.title} → ${n.title}` + (dateNote ? `, ${dateNote}` : ""));
+      mark[j] = " ✏️";
+    } else if (dateNote) {
+      changes.push(`${num}. ${n.title}: ${dateNote}`);
+      mark[j] = " ✏️";
+    }
+  });
+  before.steps.forEach((o, idx) => {
+    if (!usedOld.has(idx)) changes.push(`빠진 단계: ${o.title}`);
+  });
+
+  const list = after.steps.map((n, j) => `${start + j}. ${n.title} - ${md(n.dueDate)}${mark[j]}`).join("\n");
+  return { changes, list };
+}
+
+/** 바뀐 점과 남은 단계를 담당자 DM 본문으로 만든다. */
+const changeMessage = (headline: string, diff: { changes: string[]; list: string }, doneCount: number) =>
+  `${headline}\n\n바뀐 점\n${diff.changes.map((c) => `• ${c}`).join("\n")}\n\n` +
+  `남은 단계${doneCount ? ` (끝낸 ${doneCount}단계는 그대로)` : ""}\n${diff.list}`;
+
 /**
  * 수정 입력창의 단계 텍스트를 읽는다. 한 줄에 한 단계, "제목 - YYYY-MM-DD" (앞 번호는 있어도 없어도 됨).
  * 날짜가 틀리거나 최종 마감보다 늦으면 errors에 줄 번호와 이유를 담는다.
@@ -239,8 +319,10 @@ export async function handleStatus(i: ChatInputCommandInteraction) {
   if (i.user.id !== config.LEADER_ID) {
     return i.reply({ content: "팀 리더만 현황을 볼 수 있어요.", flags: MessageFlags.Ephemeral });
   }
-  // 멘션은 표시만 되고 알림은 가지 않게 막는다.
-  return i.reply({ content: statusReport(), flags: MessageFlags.Ephemeral, allowedMentions: { parse: [] } });
+  // 멘션은 표시만 되고 알림은 가지 않게 막는다. 리더가 본 막힘·주의는 성공 기준 측정용으로 기록.
+  const seen: Seen = { blockedCheckinIds: [], riskTaskIds: [] };
+  await i.reply({ content: statusReport(undefined, seen), flags: MessageFlags.Ephemeral, allowedMentions: { parse: [] } });
+  markLeaderSeen(seen);
 }
 
 export async function handleDone(i: ChatInputCommandInteraction) {
@@ -321,7 +403,7 @@ function approveDraft(task: Task): Task[] {
     const copies = assigneesOf(task).slice(1).map((assigneeId) => {
       const copy = tx
         .insert(tasks)
-        .values({ title: task.title, rawText: task.rawText, assigneeId, dueDate: task.dueDate, status: "approved" })
+        .values({ title: task.title, rawText: task.rawText, assigneeId, dueDate: task.dueDate, status: "approved", draftEdits: null })
         .returning()
         .get();
       tx.insert(steps)
@@ -444,9 +526,22 @@ export async function handleTaskEditModal(i: ModalSubmitInteraction) {
     });
   }
 
-  const doneCount = stepsOf(task.id).filter((s) => s.done).length;
+  const current = stepsOf(task.id);
+  const doneCount = current.filter((s) => s.done).length;
+  const diff = diffTask(
+    { title: task.title, dueDate: task.dueDate, steps: current.filter((s) => !s.done) },
+    { title, dueDate: due, steps: parsed },
+    doneCount + 1,
+  );
+  if (diff.changes.length === 0) {
+    return i.reply({ content: `바뀐 내용이 없어요. ${what}는 그대로 뒀어요.`, flags: MessageFlags.Ephemeral });
+  }
+
   db.transaction((tx) => {
-    tx.update(tasks).set({ title, dueDate: due }).where(eq(tasks.id, task.id)).run();
+    tx.update(tasks)
+      .set({ title, dueDate: due, ...(sent ? {} : { draftEdits: (task.draftEdits ?? 0) + 1 }) })
+      .where(eq(tasks.id, task.id))
+      .run();
     tx.delete(steps).where(and(eq(steps.taskId, task.id), eq(steps.done, false))).run();
     tx.insert(steps)
       .values(parsed.map((s, idx) => ({ taskId: task.id, position: doneCount + idx + 1, ...s })))
@@ -459,17 +554,14 @@ export async function handleTaskEditModal(i: ModalSubmitInteraction) {
     return i.reply({ ...updated, flags: MessageFlags.Ephemeral });
   }
 
-  let notice = `✏️ [${title}] 수정했고 <@${task.assigneeId}>에게 알렸어요.`;
+  const summary = diff.changes.map((c) => `• ${c}`).join("\n");
+  let notice = `✏️ <@${task.assigneeId}> [${title}] 수정했고 알렸어요\n${summary}`;
   try {
     const user = await i.client.users.fetch(task.assigneeId);
-    await user.send(
-      `과제가 수정됐어요: ${title} (마감 ${due})\n` +
-        (doneCount ? `끝낸 ${doneCount}단계는 그대로예요.\n` : "") +
-        `남은 단계:\n${stepLines(parsed, doneCount + 1)}`,
-    );
+    await user.send(changeMessage(`✏️ [${title}] 과제가 수정됐어요`, diff, doneCount));
   } catch (err) {
     console.error(`수정 알림 DM 실패 task=${task.id}`, err);
-    notice = `✏️ [${title}] 수정했지만 <@${task.assigneeId}>에게 DM을 보내지 못했어요. DM 허용 설정을 확인해 주세요.`;
+    notice = `✏️ <@${task.assigneeId}> [${title}] 수정했지만 DM을 보내지 못했어요. DM 허용 설정을 확인해 주세요.\n${summary}`;
   }
   const reply = { content: notice, components: [], allowedMentions: { parse: [] as never[] } };
   if (i.isFromMessage()) return i.update(reply);
@@ -574,6 +666,7 @@ export async function handleDueDecision(i: ButtonInteraction) {
   let toAssignee: string;
   let note: string;
   if (answer === "yes") {
+    const beforeSteps = stepsOf(task.id);
     db.transaction((tx) => {
       tx.update(tasks).set({ dueDate: req.newDue }).where(eq(tasks.id, task.id)).run();
       for (const s of tx.select().from(steps).where(and(eq(steps.taskId, task.id), eq(steps.done, false))).all()) {
@@ -583,10 +676,13 @@ export async function handleDueDecision(i: ButtonInteraction) {
       }
       tx.update(dueRequests).set({ status: "approved" }).where(eq(dueRequests.id, req.id)).run();
     });
-    const open = stepsOf(task.id).filter((s) => !s.done);
-    toAssignee =
-      `✅ 마감 변경이 승인됐어요: [${task.title}] ${req.oldDue} → ${req.newDue}\n남은 단계:\n` +
-      stepLines(open, stepsOf(task.id).length - open.length + 1);
+    const doneCount = beforeSteps.filter((s) => s.done).length;
+    const diff = diffTask(
+      { title: task.title, dueDate: req.oldDue, steps: beforeSteps.filter((s) => !s.done) },
+      { title: task.title, dueDate: req.newDue, steps: stepsOf(task.id).filter((s) => !s.done) },
+      doneCount + 1,
+    );
+    toAssignee = changeMessage(`✅ [${task.title}] 마감 변경이 승인됐어요`, diff, doneCount);
     note = "✅ 승인했어요. 단계 일정을 더 고치려면 `/과제수정`을 쓰세요.";
   } else {
     db.update(dueRequests).set({ status: "rejected" }).where(eq(dueRequests.id, req.id)).run();
@@ -601,6 +697,13 @@ export async function handleDueDecision(i: ButtonInteraction) {
     note += " (담당자에게 DM을 보내지 못했어요.)";
   }
   return i.update({ content: `${i.message.content}\n\n${note}`, components: [], allowedMentions: { parse: [] } });
+}
+
+export async function handleSuccess(i: ChatInputCommandInteraction) {
+  if (i.user.id !== config.LEADER_ID) {
+    return i.reply({ content: "팀 리더만 볼 수 있어요.", flags: MessageFlags.Ephemeral });
+  }
+  return i.reply({ content: successReport(), flags: MessageFlags.Ephemeral, allowedMentions: { parse: [] } });
 }
 
 export async function handleWeekly(i: ChatInputCommandInteraction) {

@@ -606,10 +606,21 @@ describe("/과제수정 (전달한 과제 수정)", () => {
     ]);
     expect(jobs.findTask(task.id)!.dueDate).toBe("2026-11-20");
     const dm = text(dmsTo(INTERN)[0]);
-    expect(dm).toContain("과제가 수정됐어요");
-    expect(dm).toContain("끝낸 1단계는 그대로예요");
-    expect(dm).toContain("4. 리뷰 반영 - 2026-11-20");
-    expect(m.update.mock.calls[0][0].content).toContain("수정했고");
+    expect(dm).toBe(
+      "✏️ [버튼 컴포넌트 3종] 과제가 수정됐어요\n\n" +
+        "바뀐 점\n" +
+        "• 최종 마감: 11/13 → 11/20\n" +
+        "• 2. 스타일 구현: 목표일 11/9 → 11/12\n" +
+        "• 3. Storybook 문서: 목표일 11/13 → 11/17\n" +
+        "• 새 단계: 4. 리뷰 반영 (11/20)\n\n" +
+        "남은 단계 (끝낸 1단계는 그대로)\n" +
+        "2. 스타일 구현 - 11/12 ✏️\n" +
+        "3. Storybook 문서 - 11/17 ✏️\n" +
+        "4. 리뷰 반영 - 11/20 🆕",
+    );
+    const notice = m.update.mock.calls[0][0].content;
+    expect(notice).toContain("수정했고 알렸어요");
+    expect(notice).toContain("• 최종 마감: 11/13 → 11/20");
   });
 
   it("형식이 틀리면 아무것도 바꾸지 않고 담당자에게도 알리지 않는다", async () => {
@@ -705,7 +716,12 @@ describe("마감 변경 요청 (담당자 → 팀 리더 승인)", () => {
     expect(jobs.findTask(task.id)!.dueDate).toBe("2026-11-20");
     expect(stepsOf(task.id).map((s) => s.dueDate)).toEqual(["2026-11-05", "2026-11-09", "2026-11-20"]);
     expect(requests()[0].status).toBe("approved");
-    expect(text(dmsTo(INTERN).at(-1))).toContain("승인됐어요: [버튼 컴포넌트 3종] 2026-11-13 → 2026-11-20");
+    const dm = text(dmsTo(INTERN).at(-1));
+    expect(dm).toContain("✅ [버튼 컴포넌트 3종] 마감 변경이 승인됐어요");
+    expect(dm).toContain("• 최종 마감: 11/13 → 11/20");
+    expect(dm).toContain("• 3. Storybook 문서: 목표일 11/13 → 11/20");
+    expect(dm).toContain("3. Storybook 문서 - 11/20 ✏️");
+    expect(dm).toContain("1. props 설계 - 11/5\n"); // 안 바뀐 단계는 표시 없음
     expect(b.update.mock.calls[0][0].content).toContain("승인했어요");
     expect(jobs.statusReport()).not.toContain("마감 변경 요청");
   });
@@ -802,5 +818,162 @@ describe("날짜 검증", () => {
       expect(i.reply.mock.calls[0][0].content).toContain("YYYY-MM-DD");
     }
     expect(commands.parseSteps("a - 2026-13-01", "2026-12-31").errors[0]).toContain("올바르지 않아요");
+  });
+});
+
+describe("성공 기준 측정", () => {
+  async function editDraft(id: number, times: number) {
+    for (let n = 0; n < times; n++) {
+      await commands.handleTaskEditModal({
+        user: { id: LEADER }, client, customId: `taskedit:${id}`, isFromMessage: () => true,
+        fields: { getTextInputValue: (k: string) => ({ title: "t", due: "2026-11-13", steps: `a${n} - 2026-11-10` })[k] },
+        reply: vi.fn(async () => {}), update: vi.fn(async () => {}),
+      } as any);
+    }
+  }
+  async function draftId(opts: Record<string, string> = {}) {
+    const i = slash(LEADER, { 내용: "x", 마감: "2026-11-13", ...opts });
+    await commands.handleAssign(i);
+    return Number(customIds(i.editReply.mock.calls[0][0])[0].split(":")[1]);
+  }
+  const report = () => jobs.successReport();
+
+  it("초안 수정 횟수를 세고, 1회 이내 확정 비율을 보여 준다 (복사본은 빼고)", async () => {
+    const a = await draftId({ 담당자2: INTERN2 });
+    await editDraft(a, 2);
+    await commands.handleButton(button(LEADER, `approve:${a}`));
+    const b = await draftId();
+    await editDraft(b, 1);
+    await commands.handleButton(button(LEADER, `approve:${b}`));
+    const rows = db.select().from(schema.tasks).all();
+    expect(rows.map((t) => t.draftEdits)).toEqual([2, null, 1]); // 복사본은 null
+    expect(report()).toContain("❌ 초안 수정 1회 이내 확정 1/2 (50%, 목표 80%)");
+  });
+
+  it("전달한 뒤 /과제수정은 초안 수정 횟수에 넣지 않는다", async () => {
+    const task = await approvedTask();
+    await editDraft(task.id, 1);
+    expect(jobs.findTask(task.id)!.draftEdits).toBe(0);
+  });
+
+  it("막힘을 아침 요약으로 다음 날 알면 1영업일 이내, 아무도 안 보면 놓친 것으로 센다", async () => {
+    const a = await approvedTask();
+    await jobs.handleBlockedModal(modal(INTERN, `blocked:${a.id}`, "에러")); // 수: 막힘 (전달 안 함)
+    setToday("2026-11-05");
+    await jobs.sendMorning(client); // 목 아침 요약에서 리더가 봄
+    expect(checkinsOf(a.id)[0].leaderSeenAt).toBe("2026-11-05");
+    expect(report()).toContain("✅ 막힘 1영업일 이내 리더 인지 1/1");
+
+    const b = await approvedTask();
+    await jobs.handleBlockedModal(modal(INTERN, `blocked:${b.id}`, "에러")); // 목: 막힘, 아무도 안 봄
+    setToday("2026-11-09"); // 월: 2영업일 지남
+    expect(report()).toContain("❌ 막힘 1영업일 이내 리더 인지 1/2");
+  });
+
+  it("전달에 동의하면 그날 리더가 안 것으로, /현황을 보면 그날 본 것으로 기록한다", async () => {
+    const a = await approvedTask();
+    await jobs.handleBlockedModal(modal(INTERN, `blocked:${a.id}`, "에러"));
+    await jobs.handleShareButton(button(INTERN, `share:${a.id}:yes`, "힌트\n\n이 상황을"));
+    expect(checkinsOf(a.id)[0].leaderSeenAt).toBe("2026-11-04");
+
+    const b = await approvedTask();
+    await jobs.handleBlockedModal(modal(INTERN, `blocked:${b.id}`, "에러"));
+    await commands.handleStatus(slash(LEADER));
+    expect(checkinsOf(b.id)[0].leaderSeenAt).toBe("2026-11-04");
+  });
+
+  it("마감을 넘긴 과제를 세고, 리더가 2영업일 전에 경고를 봤는지 보여 준다", async () => {
+    const late = await approvedTask("2026-11-05"); // 수 생성, 목 마감, 3단계 → 바로 주의
+    await jobs.sendMorning(client); // 수 아침 요약: 주의로 봄 (마감 1영업일 전)
+    expect(jobs.findTask(late.id)!.riskWarnedAt).toBe("2026-11-04");
+    const onTime = await approvedTask("2026-11-13");
+    for (let n = 0; n < 3; n++) await jobs.handleCheckinButton(button(INTERN, `checkin:${onTime.id}:done`));
+    expect(jobs.findTask(onTime.id)!.completedAt).toBe("2026-11-04");
+
+    setToday("2026-11-06");
+    const r = report();
+    expect(r).toContain("❌ 마감 놓친 과제 1건 (목표 0건), 2영업일 전 경고 0/1");
+    expect(r).toContain("버튼 컴포넌트 3종 (마감 11/5)");
+  });
+
+  it("마감 뒤에 끝낸 과제도 놓친 것으로 센다", async () => {
+    const t = await approvedTask("2026-11-05");
+    setToday("2026-11-06");
+    for (let n = 0; n < 3; n++) await commands.handleDone(slash(INTERN));
+    expect(jobs.findTask(t.id)!.completedAt).toBe("2026-11-06");
+    expect(report()).toContain("마감 놓친 과제 1건");
+  });
+
+  it("아무 일도 없으면 기록 없음으로 보여 준다", () => {
+    const r = report();
+    expect(r).toContain("➖ 초안 수정 1회 이내 확정: 아직 전달한 초안 없음");
+    expect(r).toContain("✅ 마감 놓친 과제 0건");
+  });
+
+  it("담당자 아침 DM에 마감 위험을 미리 알린다", async () => {
+    await approvedTask("2026-11-05");
+    sent.clear();
+    await jobs.sendMorning(client);
+    expect(text(dmsTo(INTERN)[0])).toContain("⚠️ 마감이 빠듯해요 (남은 단계 3개, 남은 영업일 1일)");
+  });
+
+  it("/성공기준은 팀 리더만 보고, 주간 리포트에도 붙는다", async () => {
+    const no = slash(OTHER);
+    await commands.handleSuccess(no);
+    expect(no.reply.mock.calls[0][0].content).toContain("팀 리더만");
+    const yes = slash(LEADER);
+    await commands.handleSuccess(yes);
+    expect(yes.reply.mock.calls[0][0].content).toContain("**성공 기준** (전체 기간)");
+    expect(jobs.weeklyReport()).toContain("**성공 기준**");
+  });
+});
+
+describe("바뀐 점 표시", () => {
+  const st = (title: string, dueDate: string) => ({ title, dueDate });
+  const base = { title: "버튼", dueDate: "2026-11-13", steps: [st("설계", "2026-11-05"), st("스타일 구현", "2026-11-09"), st("접근성 점검", "2026-11-11")] };
+
+  it("이름 변경·새 단계·빠진 단계·목표일 변경을 구분한다", () => {
+    const d = commands.diffTask(base, {
+      title: "버튼 컴포넌트",
+      dueDate: "2026-11-13",
+      steps: [st("설계", "2026-11-06"), st("Primary·Ghost 스타일 구현", "2026-11-09"), st("리뷰 반영", "2026-11-13"), st("문서", "2026-11-13")],
+    }, 1);
+    expect(d.changes).toEqual([
+      "과제 제목: 버튼 → 버튼 컴포넌트",
+      "1. 설계: 목표일 11/5 → 11/6",
+      "이름 변경: 2. 스타일 구현 → Primary·Ghost 스타일 구현",
+      "이름 변경: 3. 접근성 점검 → 리뷰 반영, 목표일 11/11 → 11/13",
+      "새 단계: 4. 문서 (11/13)",
+    ]);
+    expect(d.list.split("\n")).toEqual([
+      "1. 설계 - 11/6 ✏️",
+      "2. Primary·Ghost 스타일 구현 - 11/9 ✏️",
+      "3. 리뷰 반영 - 11/13 ✏️",
+      "4. 문서 - 11/13 🆕",
+    ]);
+  });
+
+  it("단계를 빼면 빠진 단계로, 순서만 바뀐 것은 적지 않는다", () => {
+    const d = commands.diffTask(base, { ...base, steps: [st("스타일 구현", "2026-11-09"), st("설계", "2026-11-05")] }, 1);
+    expect(d.changes).toEqual(["빠진 단계: 접근성 점검"]);
+    expect(d.list).not.toContain("✏️");
+  });
+
+  it("바뀐 게 없으면 저장하지 않고 담당자에게 알리지 않는다", async () => {
+    const task = await approvedTask();
+    sent.clear();
+    const m = {
+      user: { id: LEADER }, client, customId: `taskedit:${task.id}`, isFromMessage: () => true,
+      fields: { getTextInputValue: (k: string) => ({
+        title: "버튼 컴포넌트 3종", due: "2026-11-13",
+        steps: "1. props 설계 - 2026-11-05\n2. 스타일 구현 - 2026-11-09\n3. Storybook 문서 - 2026-11-13",
+      })[k] },
+      reply: vi.fn(async () => {}), update: vi.fn(async () => {}),
+    } as any;
+    const before = stepsOf(task.id).map((x) => x.id);
+    await commands.handleTaskEditModal(m);
+    expect(m.reply.mock.calls[0][0].content).toContain("바뀐 내용이 없어요");
+    expect(dmsTo(INTERN)).toHaveLength(0);
+    expect(stepsOf(task.id).map((x) => x.id)).toEqual(before); // 다시 만들지도 않음
   });
 });
