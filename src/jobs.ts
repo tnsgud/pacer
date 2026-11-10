@@ -284,6 +284,11 @@ export async function handleShareButton(i: ButtonInteraction) {
   }
   await sendDm(i.client, config.LEADER_ID, {
     content: `🚧 <@${task.assigneeId}> [${task.title}] 막힘\n> ${checkin.summary}\n담당자가 전달에 동의한 요약이에요.`,
+    components: [
+      new ActionRowBuilder<ButtonBuilder>().addComponents(
+        new ButtonBuilder().setCustomId(`reply:${checkin.id}`).setLabel("답장 보내기").setStyle(ButtonStyle.Primary),
+      ),
+    ],
     allowedMentions: { parse: [] },
   });
   await i.update({ content: `${base}\n\n팀 리더님께 요약을 전달했어요.`, components: [] });
@@ -470,6 +475,10 @@ export function successReport(today = todayKst(), sinceDate?: string): string {
   out.push(decided.length
     ? `${mark(inTime === decided.length)} 막힘 1영업일 이내 리더 인지 ${inTime}/${decided.length} (목표 전부)`
     : "➖ 막힘 1영업일 이내 리더 인지: 아직 막힘 없음");
+  // 참고 (기획안 기준 밖): 리더가 답장까지 한 비율. 1영업일이 안 지난 막힘은 빼고 센다.
+  const replyDecided = blocked.filter((c) => c.leaderRepliedAt || businessDaysBetween(c.date, today) > 1);
+  const replied = replyDecided.filter((c) => c.leaderRepliedAt && businessDaysBetween(c.date, c.leaderRepliedAt) <= 1).length;
+  if (replyDecided.length) out.push(`📎 참고: 막힘에 1영업일 이내 리더 답장 ${replied}/${replyDecided.length}`);
 
   // 4) 마감 놓친 과제 0건, 놓칠 것 같으면 최소 2영업일 전에 경고
   const missed = all.filter((t) =>

@@ -1,0 +1,1 @@
+ALTER TABLE `checkins` ADD `leader_replied_at` text;

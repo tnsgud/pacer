@@ -1040,3 +1040,87 @@ describe("근무 시간 밖 알림은 소리 없이", () => {
     expect((dmsTo(LEADER)[0] as any).flags).toBe(SILENT);
   });
 });
+
+describe("팀 리더 답장", () => {
+  function replySubmit(customId: string, textValue: string, fromMessage = true) {
+    return {
+      user: { id: LEADER }, client, customId, isFromMessage: () => fromMessage,
+      message: { content: "🚧 막힘 DM" },
+      fields: { getTextInputValue: () => textValue },
+      reply: vi.fn(async () => {}), update: vi.fn(async () => {}),
+    } as any;
+  }
+  async function sharedBlock() {
+    const task = await approvedTask();
+    await jobs.handleBlockedModal(modal(INTERN, `blocked:${task.id}`, "에러"));
+    await jobs.handleShareButton(button(INTERN, `share:${task.id}:yes`, "힌트\n\n이 상황을"));
+    return { task, checkin: checkinsOf(task.id)[0], dm: dmsTo(LEADER).at(-1) as any };
+  }
+
+  it("막힘 DM에 [답장 보내기]가 붙고, 누르면 그 막힘의 답장 입력창이 뜬다", async () => {
+    const { task, checkin, dm } = await sharedBlock();
+    expect(customIds(dm)).toEqual([`reply:${checkin.id}`]);
+    const b = button(LEADER, `reply:${checkin.id}`);
+    await commands.handleReplyButton(b);
+    expect(b.showModal.mock.calls[0][0].toJSON().custom_id).toBe(`replymsg:${task.id}:${checkin.id}`);
+    const other = button(INTERN, `reply:${checkin.id}`);
+    await commands.handleReplyButton(other);
+    expect(other.showModal).not.toHaveBeenCalled();
+  });
+
+  it("답장을 담당자에게 보내고, 막힘 DM에 보낸 기록을 붙이며, 답장한 날을 남긴다", async () => {
+    const { task, checkin } = await sharedBlock();
+    sent.clear();
+    const m = replySubmit(`replymsg:${task.id}:${checkin.id}`, "로그인 폼 하단에 dialog로 해 주세요.");
+    await commands.handleReplyModal(m);
+    expect(text(dmsTo(INTERN)[0])).toBe(
+      "📩 팀 리더님 답변 · [버튼 컴포넌트 3종]\n\n로그인 폼 하단에 dialog로 해 주세요.\n\n진행하다 또 막히면 /막힘, 단계를 끝내면 /완료로 알려 주세요.",
+    );
+    const upd = m.update.mock.calls[0][0];
+    expect(upd.content).toMatch(/^🚧 막힘 DM\n✅ 답장 보냄 \(\d{2}:\d{2}\)$/);
+    expect(upd.components).toBeUndefined(); // 버튼은 남겨 둔다(추가 답장 가능)
+    expect(checkinsOf(task.id)[0].leaderRepliedAt).toBe("2026-11-04");
+  });
+
+  it("/답장은 과제를 골라 보내고, 그 과제의 답하지 않은 막힘에 기록한다", async () => {
+    const task = await approvedTask();
+    await jobs.handleBlockedModal(modal(INTERN, `blocked:${task.id}`, "에러")); // 전달 동의 없음
+    const no = slash(OTHER);
+    await commands.handleReplyCommand(no);
+    expect(no.reply.mock.calls[0][0].content).toContain("팀 리더만");
+
+    const i = slash(LEADER);
+    await commands.handleReplyCommand(i);
+    expect(customIds(i.reply.mock.calls[0][0])).toEqual([`replypick:${task.id}`]);
+    const pick = button(LEADER, `replypick:${task.id}`);
+    await commands.handleReplyButton(pick);
+    expect(pick.showModal.mock.calls[0][0].toJSON().custom_id).toBe(`replymsg:${task.id}:0`);
+
+    sent.clear();
+    const m = replySubmit(`replymsg:${task.id}:0`, "범위는 이렇게요");
+    await commands.handleReplyModal(m);
+    expect(text(dmsTo(INTERN)[0])).toContain("범위는 이렇게요");
+    expect(m.update.mock.calls[0][0].content).toContain("답장을 보냈어요");
+    expect(checkinsOf(task.id)[0].leaderRepliedAt).toBe("2026-11-04");
+  });
+
+  it("끝난 과제에는 답장할 수 없고, DM이 막히면 알려 준다", async () => {
+    const t = await approvedTask();
+    for (let n = 0; n < 3; n++) await commands.handleDone(slash(INTERN));
+    const pick = button(LEADER, `replypick:${t.id}`);
+    await commands.handleReplyButton(pick);
+    expect(pick.showModal).not.toHaveBeenCalled();
+
+    const u = await approvedTask();
+    const m = replySubmit(`replymsg:${u.id}:0`, "x");
+    m.client = { users: { fetch: async () => ({ send: async () => { throw new Error("Cannot send"); } }) } };
+    await commands.handleReplyModal(m);
+    expect(m.reply.mock.calls[0][0].content).toContain("DM을 보내지 못했어요");
+  });
+
+  it("성공 기준에 참고로 답장 비율이 나온다", async () => {
+    const { task, checkin } = await sharedBlock();
+    await commands.handleReplyModal(replySubmit(`replymsg:${task.id}:${checkin.id}`, "답"));
+    expect(jobs.successReport()).toContain("📎 참고: 막힘에 1영업일 이내 리더 답장 1/1");
+  });
+});

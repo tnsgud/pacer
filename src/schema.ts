@@ -55,6 +55,7 @@ export const checkins = sqliteTable(
     // 담당자가 "팀 리더님께 전달"에 동의했을 때만 true. true일 때만 summary를 리더에게 보여 준다.
     shared: integer("shared", { mode: "boolean" }).notNull().default(false),
     leaderSeenAt: text("leader_seen_at"), // 팀 리더가 이 막힘을 처음 안 날 (전달 동의 DM·아침 요약·/현황)
+    leaderRepliedAt: text("leader_replied_at"), // 팀 리더가 이 막힘에 처음 답장한 날 ([답장 보내기]·/답장)
     createdAt: createdAt(),
   },
   (t) => [unique().on(t.taskId, t.memberId, t.date)],

@@ -12,7 +12,7 @@ import {
   TextInputBuilder,
   TextInputStyle,
 } from "discord.js";
-import { and, eq } from "drizzle-orm";
+import { and, desc, eq, isNull } from "drizzle-orm";
 import { draftSteps } from "./ai.js";
 import { config } from "./config.js";
 import { todayKst } from "./dates.js";
@@ -28,7 +28,7 @@ import {
   statusReport,
   weeklyReport,
 } from "./jobs.js";
-import { dueRequests, members, steps, tasks } from "./schema.js";
+import { checkins, dueRequests, members, steps, tasks } from "./schema.js";
 
 type Task = typeof tasks.$inferSelect;
 
@@ -56,6 +56,12 @@ export const dueChangeCommand = new SlashCommandBuilder()
 export const weeklyCommand = new SlashCommandBuilder()
   .setName("주간리포트")
   .setDescription("이번 주 완료율·자주 막힌 단계·체크인 응답률을 봅니다 (팀 리더 전용)");
+
+// 팀 리더가 담당자에게 과제 관련 답을 보낸다. 막힘 DM의 [답장 보내기]가 없을 때(전달 동의 없는 막힘 등) 쓴다.
+export const replyCommand = new SlashCommandBuilder()
+  .setName("답장")
+  .setDescription("담당자에게 과제 관련 답장을 코치로 보냅니다 (팀 리더 전용)")
+  .setContexts(InteractionContextType.Guild, InteractionContextType.BotDM);
 
 export const statusCommand = new SlashCommandBuilder()
   .setName("현황")
@@ -136,6 +142,9 @@ const LEADER_HELP = [
   "**전달한 과제 고치기** `/과제수정` (서버 채널)",
   "• 과제를 고르면 남은 단계·마감·제목을 고칠 수 있어요. 끝난 단계는 그대로 두고, 담당자에게 바뀐 점을 DM으로 알려요.",
   "",
+  "**담당자에게 답장** `/답장` (서버 채널·봇 DM)",
+  "• 과제를 고르면 입력창이 떠요. 쓴 내용이 \"📩 팀 리더님 답변\"으로 담당자에게 그대로 가요. 봇 DM 창에 글로 쓰면 전달되지 않아요.",
+  "",
   "**현황 보기** `/현황` (서버 채널)",
   "• 막힘 · 응답 없음 · 주의 · 순조로움으로 묶어 보여 드려요.",
   "",
@@ -144,7 +153,7 @@ const LEADER_HELP = [
   "",
   "**자동으로 오는 것**",
   "• 평일 09:00 팀 과제 현황 DM",
-  "• 담당자가 막힘 전달에 동의하면 한 줄 요약 DM",
+  "• 담당자가 막힘 전달에 동의하면 한 줄 요약 DM ([답장 보내기]로 바로 답할 수 있어요)",
   "• 담당자의 마감 변경 요청 DM ([승인] [거절])",
   "",
   ASSIGNEE_HELP.replace("**코치 사용 방법 (담당자)**", "**담당자가 받는 안내**"),
@@ -451,10 +460,8 @@ export async function handleButton(i: ButtonInteraction) {
 }
 
 /** /과제수정: 진행 중인 과제를 버튼으로 고르게 한다 (최대 25개). */
-export async function handleEditTaskCommand(i: ChatInputCommandInteraction) {
-  if (i.user.id !== config.LEADER_ID) {
-    return i.reply({ content: "팀 리더만 과제를 수정할 수 있어요.", flags: MessageFlags.Ephemeral });
-  }
+/** 팀 리더용 진행 중 과제 선택 버튼(과제 제목 · 담당자, 최대 25개). 과제가 없으면 null. */
+function leaderTaskPicker(prefix: string, question: string) {
   const active = db
     .select({ task: tasks, name: members.name })
     .from(tasks)
@@ -462,24 +469,30 @@ export async function handleEditTaskCommand(i: ChatInputCommandInteraction) {
     .where(eq(tasks.status, "approved"))
     .orderBy(tasks.id)
     .all();
-  if (active.length === 0) {
-    return i.reply({ content: "진행 중인 과제가 없어요.", flags: MessageFlags.Ephemeral });
-  }
+  if (active.length === 0) return null;
   const rows: ActionRowBuilder<ButtonBuilder>[] = [];
   active.slice(0, 25).forEach(({ task, name }, idx) => {
     if (idx % 5 === 0) rows.push(new ActionRowBuilder<ButtonBuilder>());
     rows[rows.length - 1].addComponents(
       new ButtonBuilder()
-        .setCustomId(`pickedit:${task.id}`)
+        .setCustomId(`${prefix}:${task.id}`)
         .setLabel(`${task.title} · ${name}`.slice(0, 80))
         .setStyle(ButtonStyle.Primary),
     );
   });
-  return i.reply({
-    content: "어느 과제를 고칠까요?" + (active.length > 25 ? ` (앞의 25개만 보여요, 전체 ${active.length}개)` : ""),
+  return {
+    content: question + (active.length > 25 ? ` (앞의 25개만 보여요, 전체 ${active.length}개)` : ""),
     components: rows,
-    flags: MessageFlags.Ephemeral,
-  });
+    flags: MessageFlags.Ephemeral as const,
+  };
+}
+
+export async function handleEditTaskCommand(i: ChatInputCommandInteraction) {
+  if (i.user.id !== config.LEADER_ID) {
+    return i.reply({ content: "팀 리더만 과제를 수정할 수 있어요.", flags: MessageFlags.Ephemeral });
+  }
+  const picker = leaderTaskPicker("pickedit", "어느 과제를 고칠까요?");
+  return i.reply(picker ?? { content: "진행 중인 과제가 없어요.", flags: MessageFlags.Ephemeral });
 }
 
 export async function handlePickEditButton(i: ButtonInteraction) {
@@ -695,4 +708,86 @@ export async function handleWeekly(i: ChatInputCommandInteraction) {
     return i.reply({ content: "팀 리더만 볼 수 있어요.", flags: MessageFlags.Ephemeral });
   }
   return i.reply({ content: weeklyReport(), flags: MessageFlags.Ephemeral, allowedMentions: { parse: [] } });
+}
+
+// ---- 팀 리더 답장 (막힘 DM의 [답장 보내기], /답장) ----
+
+const hhmm = () =>
+  new Intl.DateTimeFormat("en-GB", { timeZone: "Asia/Seoul", hour: "2-digit", minute: "2-digit", hourCycle: "h23" }).format(new Date());
+
+function replyModal(taskId: number, checkinId: number) {
+  return new ModalBuilder()
+    .setCustomId(`replymsg:${taskId}:${checkinId}`)
+    .setTitle("담당자에게 답장")
+    .addComponents(
+      new ActionRowBuilder<TextInputBuilder>().addComponents(
+        new TextInputBuilder().setCustomId("text").setLabel("답장 (담당자에게 그대로 전달돼요)").setStyle(TextInputStyle.Paragraph)
+          .setMaxLength(1500).setRequired(true),
+      ),
+    );
+}
+
+export async function handleReplyCommand(i: ChatInputCommandInteraction) {
+  if (i.user.id !== config.LEADER_ID) {
+    return i.reply({ content: "팀 리더만 답장을 보낼 수 있어요.", flags: MessageFlags.Ephemeral });
+  }
+  const picker = leaderTaskPicker("replypick", "어느 과제의 담당자에게 답장할까요?");
+  return i.reply(picker ?? { content: "진행 중인 과제가 없어요.", flags: MessageFlags.Ephemeral });
+}
+
+/** [답장 보내기](reply:<체크인 ID>)와 /답장 과제 선택(replypick:<과제 ID>) 버튼. 입력창을 띄운다. */
+export async function handleReplyButton(i: ButtonInteraction) {
+  if (i.user.id !== config.LEADER_ID) {
+    return i.reply({ content: "팀 리더만 답장을 보낼 수 있어요.", flags: MessageFlags.Ephemeral });
+  }
+  const [kind, id] = i.customId.split(":");
+  const checkin = kind === "reply" ? db.select().from(checkins).where(eq(checkins.id, Number(id))).get() : undefined;
+  const task = findTask(checkin ? checkin.taskId : Number(id));
+  if (!task || task.status !== "approved") {
+    return i.reply({ content: "이미 끝났거나 없는 과제예요.", flags: MessageFlags.Ephemeral });
+  }
+  return i.showModal(replyModal(task.id, checkin?.id ?? 0));
+}
+
+/**
+ * 답장 제출: 담당자에게 "📩 팀 리더님 답변" DM을 보내고, 막힘 체크인에 답장한 날을 남긴다(성공 기준 측정용).
+ * 체크인을 모르면(/답장) 그 과제의 아직 답하지 않은 가장 최근 막힘에 남긴다.
+ */
+export async function handleReplyModal(i: ModalSubmitInteraction) {
+  if (i.user.id !== config.LEADER_ID) {
+    return i.reply({ content: "팀 리더만 답장을 보낼 수 있어요.", flags: MessageFlags.Ephemeral });
+  }
+  const [, taskId, checkinId] = i.customId.split(":").map(Number);
+  const task = findTask(taskId);
+  if (!task || task.status !== "approved") {
+    return i.reply({ content: "이미 끝났거나 없는 과제예요.", flags: MessageFlags.Ephemeral });
+  }
+  const text = i.fields.getTextInputValue("text").trim();
+  try {
+    await sendDm(
+      i.client,
+      task.assigneeId,
+      `📩 팀 리더님 답변 · [${task.title}]\n\n${text}\n\n진행하다 또 막히면 /막힘, 단계를 끝내면 /완료로 알려 주세요.`,
+    );
+  } catch (err) {
+    console.error(`답장 DM 실패 task=${task.id}`, err);
+    return i.reply({ content: "담당자에게 DM을 보내지 못했어요. DM 허용 설정을 확인해 주세요.", flags: MessageFlags.Ephemeral });
+  }
+
+  const target = checkinId
+    ? db.select().from(checkins).where(eq(checkins.id, checkinId)).get()
+    : db.select().from(checkins)
+        .where(and(eq(checkins.taskId, task.id), eq(checkins.status, "blocked"), isNull(checkins.leaderRepliedAt)))
+        .orderBy(desc(checkins.date)).get();
+  if (target && !target.leaderRepliedAt) {
+    db.update(checkins).set({ leaderRepliedAt: todayKst() }).where(eq(checkins.id, target.id)).run();
+  }
+
+  if (checkinId && i.isFromMessage()) {
+    // 막힘 DM: 버튼은 남겨 두고(추가 답장 가능) 보낸 기록만 붙인다.
+    return i.update({ content: `${i.message.content}\n✅ 답장 보냄 (${hhmm()})`, allowedMentions: { parse: [] } });
+  }
+  const done = { content: `✅ <@${task.assigneeId}>에게 [${task.title}] 답장을 보냈어요.`, components: [], allowedMentions: { parse: [] as never[] } };
+  if (i.isFromMessage()) return i.update(done);
+  return i.reply({ ...done, flags: MessageFlags.Ephemeral });
 }

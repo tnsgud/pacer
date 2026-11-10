@@ -43,6 +43,13 @@
       "when": 1794212514008,
       "tag": "0005_flowery_william_stryker",
       "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "6",
+      "when": 1794272600255,
+      "tag": "0006_right_galactus",
+      "breakpoints": true
     }
   ]
 }
